@@ -346,7 +346,84 @@ def record_git_pull_event(
 
 
 def main():
-    """Point d'entrée du serveur FastMCP en mode stdio."""
+    """Point d'entrée du serveur FastMCP en mode stdio ou CLI si sous-commande fournie."""
+    if len(sys.argv) > 1 and sys.argv[1] in ("list", "commit", "diff", "restore", "prune"):
+        import argparse
+
+        if sys.platform == "win32":
+            try:
+                sys.stdout.reconfigure(encoding="utf-8")
+                sys.stderr.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
+        parser = argparse.ArgumentParser(prog="doc-version", description="FastMCP doc-version CLI bridge")
+        subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+        # list
+        p_list = subparsers.add_parser("list", help="List CAS commits")
+        p_list.add_argument("--target", default="", help="Target file path or virtual identifier filter")
+        p_list.add_argument("--limit", type=int, default=10, help="Maximum number of commits")
+        p_list.add_argument("--mode", default="", help="Filter by mode (paper/draft)")
+
+        # commit
+        p_commit = subparsers.add_parser("commit", help="Commit document to CAS")
+        p_commit.add_argument("--target", required=True, help="Target file path or virtual identifier")
+        p_commit.add_argument("--message", required=True, help="Commit message")
+        p_commit.add_argument("--content", default="", help="Literal content")
+        p_commit.add_argument("--content-file", default="", help="Path to content file")
+        p_commit.add_argument("--author", default="agent", help="Author name")
+        p_commit.add_argument("--mode", default="paper", choices=["paper", "draft"], help="Operating mode")
+        p_commit.add_argument("--pinned", action="store_true", help="Pin snapshot")
+
+        # diff
+        p_diff = subparsers.add_parser("diff", help="Generate diff artifact")
+        p_diff.add_argument("--target", required=True, help="Target file path or virtual identifier")
+        p_diff.add_argument("--explanation", default="", help="Concise diff explanation")
+        p_diff.add_argument("--content", default="", help="New literal content")
+        p_diff.add_argument("--content-file", default="", help="Path to new content file")
+        p_diff.add_argument("--from-commit", default="", help="Base commit ID")
+        p_diff.add_argument("--to-commit", default="", help="Target commit ID")
+        p_diff.add_argument("--mode", default="paper", choices=["paper", "draft"], help="Operating mode")
+        p_diff.add_argument("--brain-dir", default="", help="Brain directory to write artifact")
+        p_diff.add_argument("--artifact-name", default="", help="Base name of output artifact")
+
+        # restore
+        p_restore = subparsers.add_parser("restore", help="Restore snapshot from CAS")
+        p_restore.add_argument("--commit-id", required=True, help="Commit ID to restore")
+        p_restore.add_argument("--target", default="", help="Target destination file path")
+        p_restore.add_argument("--dry-run", action="store_true", help="Dry run preview")
+
+        # prune
+        p_prune = subparsers.add_parser("prune", help="Prune expired CAS commits")
+        p_prune.add_argument("--ttl-days", type=int, default=14, help="TTL in days")
+        p_prune.add_argument("--max-size-mb", type=int, default=500, help="Max CAS cache size in MB")
+        p_prune.add_argument("--no-keep-baselines", action="store_true", help="Do not protect pinned baselines")
+
+        args = parser.parse_args()
+
+        if args.subcommand == "list":
+            print(list_commits(target=args.target, limit=args.limit, mode=args.mode))
+        elif args.subcommand == "commit":
+            c = ""
+            if args.content_file:
+                c = Path(args.content_file).read_text(encoding="utf-8", errors="replace")
+            elif args.content:
+                c = args.content
+            print(commit_document(target=args.target, message=args.message, content=c, author=args.author, mode=args.mode, is_pinned=args.pinned))
+        elif args.subcommand == "diff":
+            c = ""
+            if args.content_file:
+                c = Path(args.content_file).read_text(encoding="utf-8", errors="replace")
+            elif args.content:
+                c = args.content
+            print(get_diff_artifact(target=args.target, diff_explanation=args.explanation, content=c, from_commit_id=args.from_commit, to_commit_id=args.to_commit, mode=args.mode, brain_dir=args.brain_dir, artifact_name=args.artifact_name))
+        elif args.subcommand == "restore":
+            print(restore_commit(commit_id=args.commit_id, target=args.target, dry_run=args.dry_run))
+        elif args.subcommand == "prune":
+            print(prune_commits(ttl_days=args.ttl_days, max_size_mb=args.max_size_mb, keep_baselines=not args.no_keep_baselines))
+        return
+
     # Rediriger stderr pour éviter de polluer le protocole stdio
     mcp.run(transport="stdio")
 

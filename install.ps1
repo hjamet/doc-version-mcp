@@ -189,7 +189,7 @@ $hasUv = [bool](Get-Command uv -ErrorAction SilentlyContinue)
 if (-not (Test-Path $VenvPython)) {
     Write-Host "      Creation de l'environnement virtuel Python..." -ForegroundColor Cyan
     if ($hasUv) {
-        & uv venv $VenvDir
+        & uv venv --clear $VenvDir
     } elseif ($pythonInfo.Tool -eq "py") {
         & py $pythonInfo.Args -m venv $VenvDir
     } else {

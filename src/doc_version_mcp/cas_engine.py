@@ -27,7 +27,11 @@ class CASEngine:
             if env_dir:
                 self.storage_dir = Path(env_dir).resolve()
             else:
-                self.storage_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
+                default_cas = Path.home() / ".gemini" / "antigravity" / "cas_commits"
+                if default_cas.exists():
+                    self.storage_dir = default_cas.resolve()
+                else:
+                    self.storage_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
 
         self.objects_dir = self.storage_dir / "objects"
         self.commits_dir = self.storage_dir / "commits"
