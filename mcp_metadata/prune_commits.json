@@ -1,0 +1,22 @@
+{
+  "name": "prune_commits",
+  "description": "Purge les snapshots expirés selon le TTL et régule la taille totale sous max_size_mb.\nProtège les baselines épinglées (is_pinned) si keep_baselines=True.",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "keep_baselines": {
+        "default": true,
+        "type": "boolean"
+      },
+      "max_size_mb": {
+        "default": 500,
+        "type": "integer"
+      },
+      "ttl_days": {
+        "default": 14,
+        "type": "integer"
+      }
+    },
+    "type": "object"
+  }
+}

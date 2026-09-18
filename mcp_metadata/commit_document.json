@@ -1,0 +1,36 @@
+{
+  "name": "commit_document",
+  "description": "Crée un instantané horodaté d'un document dans le Content-Addressable Storage (CAS).\nSupporte les fichiers sur disque et les mémoires virtuelles (drafts sans fichier).",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "author": {
+        "default": "agent",
+        "type": "string"
+      },
+      "content": {
+        "default": "",
+        "type": "string"
+      },
+      "is_pinned": {
+        "default": false,
+        "type": "boolean"
+      },
+      "message": {
+        "type": "string"
+      },
+      "mode": {
+        "default": "paper",
+        "type": "string"
+      },
+      "target": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "target",
+      "message"
+    ],
+    "type": "object"
+  }
+}

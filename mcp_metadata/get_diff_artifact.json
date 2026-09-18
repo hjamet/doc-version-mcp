@@ -1,0 +1,44 @@
+{
+  "name": "get_diff_artifact",
+  "description": "Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.\nSupporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "artifact_name": {
+        "default": "",
+        "type": "string"
+      },
+      "brain_dir": {
+        "default": "",
+        "type": "string"
+      },
+      "content": {
+        "default": "",
+        "type": "string"
+      },
+      "diff_explanation": {
+        "default": "",
+        "type": "string"
+      },
+      "from_commit_id": {
+        "default": "",
+        "type": "string"
+      },
+      "mode": {
+        "default": "paper",
+        "type": "string"
+      },
+      "target": {
+        "type": "string"
+      },
+      "to_commit_id": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "required": [
+      "target"
+    ],
+    "type": "object"
+  }
+}

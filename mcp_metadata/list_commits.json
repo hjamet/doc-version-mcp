@@ -1,0 +1,22 @@
+{
+  "name": "list_commits",
+  "description": "Liste les commits stockés dans le CAS avec métadonnées d'horodatage et auteur.",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 10,
+        "type": "integer"
+      },
+      "mode": {
+        "default": "",
+        "type": "string"
+      },
+      "target": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

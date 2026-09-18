@@ -1,0 +1,20 @@
+{
+  "name": "record_git_pull_event",
+  "description": "Synchronise un dépôt Git via git pull --rebase (--autostash),\ndétecte les conflits et enregistre un snapshot CAS horodaté de l'état récupéré.",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "autostash": {
+        "default": true,
+        "type": "boolean"
+      },
+      "repo_path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "repo_path"
+    ],
+    "type": "object"
+  }
+}

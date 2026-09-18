@@ -1,0 +1,24 @@
+{
+  "name": "restore_commit",
+  "description": "Restaure un document depuis son commit ID dans le CAS.\nSi dry_run=True, prévisualise sans modifier le disque.",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "commit_id": {
+        "type": "string"
+      },
+      "dry_run": {
+        "default": false,
+        "type": "boolean"
+      },
+      "target": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "required": [
+      "commit_id"
+    ],
+    "type": "object"
+  }
+}
