@@ -153,7 +153,9 @@ def get_diff_artifact(
             source_file=target,
             baseline_commit=baseline_commit_id,
             recent_commits=recent_commits,
-            enable_ai_score=True
+            enable_ai_score=True,
+            final_content=new_text,
+            mode=mode
         )
 
         # Sauvegarde dans brain_dir si fourni

@@ -383,7 +383,9 @@ class ArtifactBuilder:
         baseline_commit: Optional[str] = None,
         image_rel: Optional[str] = None,
         recent_commits: Optional[List[Dict[str, Any]]] = None,
-        enable_ai_score: bool = True
+        enable_ai_score: bool = True,
+        final_content: Optional[str] = None,
+        mode: str = "paper"
     ) -> str:
         """Assemble l'artéfact complet destiné à Antigravity Brain."""
         header = cls.build_artifact_header(
@@ -434,7 +436,19 @@ class ArtifactBuilder:
         # 3. Tableau des 5 derniers commits CAS
         commits_block = cls.build_recent_commits_table(recent_commits, limit=5)
 
-        full_doc = f"{header}{diff_block}{commits_block}{processed_body.rstrip()}\n"
+        # 4. Bloc dépliant de texte final prêt à copier (mode draft)
+        copy_block = ""
+        if mode == "draft" and final_content and final_content.strip():
+            copy_block = (
+                f"<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n"
+                f"```text\n"
+                f"{final_content.strip()}\n"
+                f"```\n"
+                f"</details>\n\n"
+                f"---\n\n"
+            )
+
+        full_doc = f"{header}{copy_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
         if diff_explanation.strip():
             full_doc = cls.inject_explanation_callout(full_doc, diff_explanation.strip())
 

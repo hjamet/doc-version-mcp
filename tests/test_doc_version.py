@@ -263,6 +263,8 @@ def test_fastmcp_server_tools(temp_cas_dir, monkeypatch):
     assert res_diff["status"] == "success"
     assert "artifact_content" in res_diff
     assert "TREE TOC" not in res_diff["artifact_content"] or "Arborescence" in res_diff["artifact_content"]
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in res_diff["artifact_content"]
+    assert "```text" in res_diff["artifact_content"]
 
     # 4. restore_commit (dry_run)
     res_restore = json.loads(restore_commit(commit_id=c_id, dry_run=True))
@@ -325,4 +327,49 @@ def test_artifact_builder_recent_commits_and_ai_badges(temp_cas_dir, monkeypatch
 
     # Invariant 3 : Présence du badge de score IA
     assert "Score IA" in content or "Conformité Anti-IA" in content
+
+    # Invariant 4 : Présence du bloc dépliant de texte final prêt à copier en mode draft
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in content
+    assert "```text" in content
+    assert "Thank you for your patience as we finalize this important step together." in content
+
+
+def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
+    """Valide la présence du bloc dépliant prêt à copier en mode draft et son absence formelle en mode paper."""
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    c0 = json.loads(commit_document(
+        target="doc_test.md",
+        message="Initial doc",
+        content="Version initiale du texte.",
+        author="henri",
+        mode="draft"
+    ))
+
+    # 1. Mode draft -> Doit contenir le bloc dépliant et le bloc de code text
+    res_draft = json.loads(get_diff_artifact(
+        target="doc_test.md",
+        diff_explanation="Test draft copy block",
+        content="Version finale polie prête à copier.",
+        from_commit_id=c0["commit_id"],
+        mode="draft"
+    ))
+    assert res_draft["status"] == "success"
+    art_draft = res_draft["artifact_content"]
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in art_draft
+    assert "```text\nVersion finale polie prête à copier.\n```" in art_draft
+
+    # 2. Mode paper -> Ne doit PAS contenir le bloc dépliant ni le bloc de code text
+    res_paper = json.loads(get_diff_artifact(
+        target="doc_test.md",
+        diff_explanation="Test paper without copy block",
+        content="Version finale polie prête à copier.",
+        from_commit_id=c0["commit_id"],
+        mode="paper"
+    ))
+    assert res_paper["status"] == "success"
+    art_paper = res_paper["artifact_content"]
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" not in art_paper
+    assert "```text" not in art_paper
 
