@@ -373,3 +373,52 @@ def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" not in art_paper
     assert "```text" not in art_paper
 
+
+def test_clean_prose_for_ai_detection_strips_latex():
+    """Valide l'éradication des commandes et environnements LaTeX pour extraire la prose pure."""
+    from doc_version_mcp.artifact_builder import clean_prose_for_ai_detection
+
+    latex_snippet = (
+        r"\begin{minipage}{0.48\textwidth}" "\n"
+        r"\fontsize{10pt}{12pt}\selectfont" "\n"
+        r"\vspace{3mm}" "\n"
+        r"\textbf{Important :} Nous démontrons l'existence d'un équilibre robuste dans cet environnement dynamique." "\n"
+        r"\cite{jamet2026} and $E = mc^2$." "\n"
+        r"\end{minipage}"
+    )
+
+    clean_prose = clean_prose_for_ai_detection(latex_snippet)
+    assert r"\begin{minipage}" not in clean_prose
+    assert r"\end{minipage}" not in clean_prose
+    assert r"\fontsize" not in clean_prose
+    assert r"\selectfont" not in clean_prose
+    assert r"\vspace" not in clean_prose
+    assert r"\cite" not in clean_prose
+    assert "$E = mc^2$" not in clean_prose
+    assert "Nous démontrons l'existence d'un équilibre robuste" in clean_prose
+
+
+def test_fail_fast_ai_detector_missing_script(monkeypatch):
+    """Valide la doctrine Fail-Fast : lève immédiatement une exception si le détecteur est manquant (zéro 5.0%)."""
+    from doc_version_mcp.artifact_builder import estimate_ai_score
+
+    # Forcer un chemin inexistant pour simuler une défaillance d'environnement
+    monkeypatch.setenv("AI_DETECTOR_PATH", r"C:\invalid\path\to\nonexistent_ai_detector.py")
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        estimate_ai_score("Ceci est une phrase de test pour valider la règle Fail-Fast.")
+
+    assert "FAIL-FAST" in str(exc_info.value)
+    assert "introuvable" in str(exc_info.value)
+
+
+def test_fail_fast_ai_detector_empty_text():
+    """Valide qu'un texte vide lève ValueError au lieu de simuler un score fictif."""
+    from doc_version_mcp.artifact_builder import estimate_ai_score
+
+    with pytest.raises(ValueError) as exc_info:
+        estimate_ai_score(r"\begin{minipage}{0.5\textwidth}\vspace{1cm}\end{minipage}")
+
+    assert "FAIL-FAST" in str(exc_info.value)
+
+

@@ -3,22 +3,14 @@ artifact_builder.py — Assemblage normé d'artéfacts Markdown Antigravity avec
 """
 
 import re
-import math
+import os
+import sys
+import json
 import shutil
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
-from collections import Counter
 from typing import Dict, List, Optional, Any, Tuple
-
-
-AI_BUZZWORDS = {
-    "delve", "delves", "delving", "tapestry", "crucial", "testament",
-    "foster", "fostering", "paramount", "pivotal", "underscores",
-    "beacon", "unwavering", "rich", "intricate", "vital", "multifaceted",
-    "holistic", "seamless", "seamlessly", "furthermore", "moreover",
-    "in conclusion", "it is worth noting", "it is important to note",
-    "landscape", "realm", "harness", "harnessing", "unleash", "unleashing"
-}
 
 
 def format_ai_score_badge(score_before: Optional[float], score_after: Optional[float]) -> str:
@@ -56,96 +48,232 @@ def format_ai_score_badge(score_before: Optional[float], score_after: Optional[f
     return f'<span style="{style}">{evolution_text}{mention}</span>'
 
 
-def calculate_pure_stylometric_score(text: str, words: List[str]) -> float:
-    """Calcule une estimation stylométrique rapide de la probabilité IA (0 à 100%)."""
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
-    n_words = len(words)
-    if n_words < 6 or not sentences:
-        return 5.0
+def clean_prose_for_ai_detection(text: str) -> str:
+    """
+    Extrait et nettoie la prose propre d'un fragment textuel avant soumission à ai_detector.py.
+    Élimine rigoureusement :
+    - Balises HTML (<span...>, <del...>, <ins...>, etc.)
+    - Environnements structuraux LaTeX (\\begin{minipage}...\\end{minipage}, \\begin{center}, etc.)
+    - Commandes de mise en page et polices LaTeX (\\fontsize{...}{...}, \\selectfont, \\vspace, \\hspace, \\setlength, etc.)
+    - Macros, citations et labels (\\cite{...}, \\label{...}, \\ref{...}, \\item, etc.)
+    - Blocs mathématiques et symboles LaTeX ($...$, $$...$$, \\[...\\])
+    - Accolades et commandes résiduelles
+    """
+    if not text or not text.strip():
+        return ""
 
-    # 1. Burstiness (variation longueur des phrases)
-    sent_lens = [len(re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', s)) for s in sentences]
-    sent_lens = [l for l in sent_lens if l > 0]
-    if not sent_lens:
-        sent_lens = [n_words]
-    mean_len = sum(sent_lens) / len(sent_lens)
-    variance = sum((l - mean_len) ** 2 for l in sent_lens) / len(sent_lens)
-    cv_len = (math.sqrt(variance) / mean_len) if mean_len > 0 else 0.0
+    from .diff_engine import DiffEngine
 
-    # 2. Entropie de Shannon
-    counts = Counter(words)
-    probs = [c / n_words for c in counts.values()]
-    word_entropy = -sum(p * math.log2(p) for p in probs)
-    max_entropy = math.log2(n_words) if n_words > 1 else 1.0
-    norm_entropy = word_entropy / max_entropy if max_entropy > 0 else 1.0
+    # 1. Suppression des balises HTML
+    cleaned = re.sub(r'<[^>]+>', ' ', text)
 
-    # 3. Buzzwords IA
-    found_buzz = [w for w in words if w in AI_BUZZWORDS]
-    text_lower = text.lower()
-    for phrase in ["in conclusion", "it is important to note", "it is worth noting"]:
-        if phrase in text_lower:
-            found_buzz.append(phrase)
-    buzzword_ratio = len(found_buzz) / n_words
+    # 2. Nettoyage via les règles de base de DiffEngine
+    cleaned = DiffEngine.clean_residual_latex(cleaned)
 
-    # Évaluation stylométrique calibrée
-    s_burst = max(0.0, min(1.0, (0.70 - cv_len) / 0.50))
-    s_buzz = min(1.0, buzzword_ratio * 40.0)
-    s_unif = 1.0 if (14.0 <= mean_len <= 26.0 and cv_len < 0.30) else 0.0
-    s_ent = max(0.0, min(1.0, 1.0 - abs(norm_entropy - 0.85) * 5.0)) if cv_len < 0.35 else 0.0
+    # 3. Élimination exhaustive des environnements de mise en page LaTeX
+    layout_envs = (
+        r'minipage|center|flushleft|flushright|abstract|quote|quotation|verse|'
+        r'figure|table|tabular|table\*|figure\*|tikzpicture|tcolorbox'
+    )
+    cleaned = re.sub(rf'\\begin\{{(?:{layout_envs})\}}.*?(?:\\end\{{(?:{layout_envs})\}}|$)', ' ', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'\\(?:begin|end)\{[^}]+\}', ' ', cleaned)
 
-    s_stylo = 0.40 * s_burst + 0.35 * s_buzz + 0.15 * s_unif + 0.10 * s_ent
-    s_stylo = max(0.0, min(1.0, s_stylo))
-    return float(round(s_stylo * 100.0, 1))
+    # Commandes de taille, police et mise en forme
+    cleaned = re.sub(r'\\fontsize\{[^{}]*\}\{[^{}]*\}\s*(?:\\selectfont)?', ' ', cleaned)
+    cleaned = re.sub(r'\\selectfont\b', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', ' ', cleaned)
+
+    # Dimensions, espacements et règles
+    cleaned = re.sub(r'\\(?:vspace|hspace|setlength|addtolength)\*?\{[^}]*\}(?:\{[^}]*\})?', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:textwidth|linewidth|columnsep|columnwidth|parindent|parskip)\b', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|raggedleft|raggedright)\b', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:rule|hrule)(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}', ' ', cleaned)
+
+    # Macros, citations, labels, refs
+    cleaned = re.sub(r'\\(?:cite|citep|citet|ref|eqref|label|pageref|nocite)\*?(?:\[[^\]]*\])?\{[^}]*\}', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:item|caption|footnote)\*?(?:\[[^\]]*\])?', ' ', cleaned)
+    cleaned = re.sub(r'\\(?:title|author|affiliation|institution|email|date|def|newcommand|renewcommand)\{[^}]*\}', ' ', cleaned)
+
+    # Maths $...$, $$...$$, \\[...\\]
+    cleaned = re.sub(r'\$\$.*?\$\$', ' ', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'\\\[.*?\\\]', ' ', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'(?<!\\)\$(.*?)(?<!\\)\$', ' ', cleaned)
+
+    # Commandes LaTeX résiduelles \\cmd
+    cleaned = re.sub(r'\\[a-zA-Z]+', ' ', cleaned)
+
+    # Accolades isolées et nettoyages de ponctuation résiduelle
+    cleaned = re.sub(r'[{}]', ' ', cleaned)
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    cleaned = re.sub(r'\n{2,}', '\n', cleaned)
+
+    return cleaned.strip()
+
+
+def resolve_ai_detector_path() -> Path:
+    """
+    Localise le script canonique ai_detector.py selon la doctrine Fail-Fast.
+    Lève immédiatement FileNotFoundError si introuvable.
+    """
+    env_path = os.environ.get("AI_DETECTOR_PATH")
+    if env_path:
+        p = Path(env_path)
+        if p.is_file():
+            return p.resolve()
+        raise FileNotFoundError(
+            f"❌ [FAIL-FAST] Script 'ai_detector.py' spécifié dans AI_DETECTOR_PATH introuvable : '{env_path}'."
+        )
+
+    candidates = [
+        Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\ai_detector.py"),
+        Path.home() / "Documents" / "VoiceNotes" / "_agents" / "scripts-for-skills" / "ai_detector.py",
+        Path(__file__).resolve().parents[3] / "VoiceNotes" / "_agents" / "scripts-for-skills" / "ai_detector.py"
+    ]
+
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+
+    raise FileNotFoundError(
+        f"❌ [FAIL-FAST] Script canonique 'ai_detector.py' introuvable.\n"
+        f"Emplacements vérifiés : {[str(c) for c in candidates]}.\n"
+        f"Le score IA ne peut pas être simulé conformément aux directives Fail-Fast d'Henri."
+    )
+
+
+def resolve_ai_detector_python() -> Path:
+    """
+    Localise l'interpréteur Python configuré avec PyTorch et CUDA selon la doctrine Fail-Fast.
+    Lève immédiatement RuntimeError si introuvable.
+    """
+    env_py = os.environ.get("AI_DETECTOR_PYTHON")
+    if env_py:
+        p = Path(env_py)
+        if p.is_file():
+            return p.resolve()
+        raise RuntimeError(
+            f"❌ [FAIL-FAST] Interpréteur spécifié dans AI_DETECTOR_PYTHON introuvable : '{env_py}'."
+        )
+
+    # 1. Vérification dans l'interpréteur courant
+    try:
+        import torch  # type: ignore # noqa: F401
+        return Path(sys.executable).resolve()
+    except ImportError:
+        pass
+
+    # 2. Interpréteurs canoniques PyTorch CUDA du système
+    candidates = [
+        Path(r"C:\Users\Jamet\.pyenv\pyenv-win\versions\3.11.9\python.exe"),
+        Path.home() / ".pyenv" / "pyenv-win" / "versions" / "3.11.9" / "python.exe",
+    ]
+
+    # Détection dynamique dans pyenv
+    pyenv_dir = Path.home() / ".pyenv" / "pyenv-win" / "versions"
+    if pyenv_dir.is_dir():
+        for sub in pyenv_dir.iterdir():
+            p_exe = sub / "python.exe"
+            if p_exe.is_file() and p_exe not in candidates:
+                candidates.append(p_exe)
+
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+
+    # Repli sur shutil.which("python") hors venv si présent
+    sys_py = shutil.which("python")
+    if sys_py:
+        p_which = Path(sys_py).resolve()
+        if p_which != Path(sys.executable).resolve():
+            return p_which
+
+    raise RuntimeError(
+        f"❌ [FAIL-FAST] Aucun interpréteur Python équipé de PyTorch/CUDA n'a été trouvé pour exécuter ai_detector.py.\n"
+        f"Candidats testés : {[str(c) for c in candidates]}.\n"
+        f"Veuillez définir la variable AI_DETECTOR_PYTHON ou installer PyTorch dans l'environnement."
+    )
 
 
 def estimate_ai_score(text: str) -> float:
     """
-    Estime la probabilité IA P(AI) en pourcentage [0.0 - 100.0].
-    Tente d'utiliser le module SOTA ai_detector s'il est présent, avec repli stylométrique robuste.
+    Calcule le score de probabilité IA P(AI) en pourcentage [0.0 - 100.0] via ai_detector.py.
+    Doctrine Fail-Fast absolue d'Henri :
+    - Débarrasse intégralement le texte des commandes et balises LaTeX de mise en page.
+    - Appelle le véritable moteur SOTA ai_detector.py (Gemma-4-E2B Binoculars, DeBERTa RAID, etc.).
+    - Zéro fallback heuristique silencieux, zéro score factice codé en dur (les 5.0% sont éradiqués).
+    - Tout échec (script introuvable, GPU/dépendance manquante, crash d'inférence) lève immédiatement une exception explicite.
     """
-    if not text or not text.strip():
-        return 0.0
+    clean_text = clean_prose_for_ai_detection(text)
+    words = re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', clean_text)
+    if not clean_text or len(words) == 0:
+        raise ValueError("❌ [FAIL-FAST] Impossible de calculer le score IA sur un segment vide ou dépourvu de prose.")
 
-    from .diff_engine import DiffEngine
-    clean_text = DiffEngine.clean_residual_latex(re.sub(r'<[^>]+>', ' ', text)).strip()
-    words = re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', clean_text.lower())
-    if len(words) < 5:
-        return 5.0
+    detector_script = resolve_ai_detector_path()
 
-    # Tentative d'import dynamique de ai_detector
+    # Si l'environnement courant possède PyTorch et peut exécuter directement ai_detector en mémoire
     try:
-        ai_mod = None
-        try:
-            import ai_detector
-            ai_mod = ai_detector
-        except ImportError:
-            candidates = [
-                Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts\ai_detector.py"),
-                Path.home() / "Documents" / "VoiceNotes" / "_agents" / "scripts" / "ai_detector.py",
-            ]
-            for cand in candidates:
-                if cand.exists():
-                    import importlib.util
-                    spec = importlib.util.spec_from_file_location("ai_detector", str(cand))
-                    if spec and spec.loader:
-                        ai_mod = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(ai_mod)
-                        break
+        import torch  # type: ignore # noqa: F401
+        import importlib.util
 
-        if ai_mod is not None:
-            try:
-                res = ai_mod.analyze_text(clean_text, allow_partial=True, offline=True)
-                return float(res["global_score"]["p_ai_percent"])
-            except Exception:
-                pass
-
-            if hasattr(ai_mod, "score_stylometric"):
-                res_stylo = ai_mod.score_stylometric(clean_text)
-                return float(round(res_stylo["score"] * 100.0, 1))
-    except Exception:
+        spec = importlib.util.spec_from_file_location("ai_detector", str(detector_script))
+        if spec and spec.loader:
+            ai_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(ai_mod)
+            res = ai_mod.analyze_text(
+                clean_text,
+                device_override="auto",
+                allow_partial=False,
+                offline=False,
+                keep_loaded=True
+            )
+            return float(res["global_score"]["p_ai_percent"])
+    except ImportError:
+        # PyTorch n'est pas dans l'environnement courant (cas normal dans le venv doc-version-mcp)
         pass
+    except Exception as e:
+        # En cas d'erreur lors de l'exécution interne directe, lève immédiatement l'exception Fail-Fast
+        raise RuntimeError(f"❌ [FAIL-FAST] Erreur lors de l'exécution in-memory de ai_detector : {e}") from e
 
-    return calculate_pure_stylometric_score(clean_text, words)
+    # Exécution via l'interpréteur Python système équipé de PyTorch / CUDA
+    python_exe = resolve_ai_detector_python()
+    clean_env = os.environ.copy()
+    clean_env.pop("VIRTUAL_ENV", None)
+    clean_env.pop("PYTHONHOME", None)
+    clean_env.pop("PYTHONPATH", None)
+
+    cmd = [
+        str(python_exe),
+        str(detector_script),
+        "--device", "auto",
+        "--json"
+    ]
+
+    proc = subprocess.run(
+        cmd,
+        input=clean_text,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=clean_env,
+        check=False
+    )
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"❌ [FAIL-FAST] Échec d'exécution de ai_detector.py (code {proc.returncode}) :\n"
+            f"STDERR :\n{proc.stderr}\nSTDOUT :\n{proc.stdout}"
+        )
+
+    try:
+        data = json.loads(proc.stdout)
+        return float(data["global_score"]["p_ai_percent"])
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"❌ [FAIL-FAST] Réponse JSON invalide reçue de ai_detector.py : {e}\n"
+            f"STDOUT brut :\n{proc.stdout}"
+        ) from e
 
 
 def extract_paragraph_diff_texts(para: str) -> Tuple[str, str]:
@@ -233,14 +361,17 @@ def attach_ai_score_badges(
             continue
 
         tb, ta = extract_paragraph_diff_texts(block)
-        wb = len(re.findall(r'\b\w+\b', tb))
-        wa = len(re.findall(r'\b\w+\b', ta))
+        clean_tb = clean_prose_for_ai_detection(tb)
+        clean_ta = clean_prose_for_ai_detection(ta)
+
+        wb = len(re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', clean_tb))
+        wa = len(re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', clean_ta))
 
         if wb < 5 and wa < 5:
             continue
 
-        score_b = estimate_ai_score(tb) if wb >= 5 else None
-        score_a = estimate_ai_score(ta) if wa >= 5 else None
+        score_b = estimate_ai_score(clean_tb) if wb >= 5 else None
+        score_a = estimate_ai_score(clean_ta) if wa >= 5 else None
 
         if score_b is not None:
             all_scores_b.append(score_b)
