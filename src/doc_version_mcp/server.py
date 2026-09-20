@@ -119,6 +119,21 @@ def get_diff_artifact(
         if not old_text:
             old_text = new_text
 
+        # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou contenu LaTeX détecté
+        target_path = Path(target) if target else None
+        base_dir = target_path.parent if (target_path and target_path.exists()) else None
+
+        def is_latex_doc(t: str) -> bool:
+            if not t:
+                return False
+            return bool(re.search(r'\\(?:documentclass|begin\{document\}|section|subsection|begin\{minipage\}|usepackage|begin\{table|fontsize|selectfont|hrule|vspace)\b', t))
+
+        if is_latex_doc(old_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in old_text):
+            old_text = LatexToMarkdownConverter.convert_text(old_text, base_dir=base_dir)
+
+        if is_latex_doc(new_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in new_text):
+            new_text = LatexToMarkdownConverter.convert_text(new_text, base_dir=base_dir)
+
         # Détermination du nom cible propre
         if artifact_name and artifact_name.strip():
             raw_target_name = artifact_name.strip()

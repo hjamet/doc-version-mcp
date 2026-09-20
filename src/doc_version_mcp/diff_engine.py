@@ -31,11 +31,11 @@ class DiffEngine:
 
     # Style Auteur Local / Agent (vert doux épuré / rouge doux)
     DEL_STYLE_LOCAL = 'style="background-color:#fee2e2; color:#991b1b; text-decoration:line-through; padding:1px 3px; border-radius:3px;"'
-    INS_STYLE_LOCAL = 'style="background-color:#dcfce7; color:#166534; font-weight:normal; text-decoration:none; -webkit-text-decoration:none; text-decoration-line:none; padding:1px 3px; border-radius:3px;"'
+    INS_STYLE_LOCAL = 'style="background-color:#dcfce7; color:#166534; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
 
     # Style Collaborateurs (bleu ciel pour ajouts, ambre doux pour suppressions)
     DEL_STYLE_COLLAB = 'style="background-color:#ffedd5; color:#9a3412; text-decoration:line-through; padding:1px 3px; border-radius:3px;"'
-    INS_STYLE_COLLAB = 'style="background-color:#dbeafe; color:#1e40af; font-weight:normal; text-decoration:none; -webkit-text-decoration:none; text-decoration-line:none; padding:1px 3px; border-radius:3px;"'
+    INS_STYLE_COLLAB = 'style="background-color:#dbeafe; color:#1e40af; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
 
     SECTION_ALIASES = {
         'the llm network game': 'the latent space',
@@ -113,12 +113,29 @@ class DiffEngine:
         """Nettoie tout résidu LaTeX afin que les comparaisons portent sur le fond."""
         if not text:
             return ""
+        # Environnements de mise en page (minipage, center, flushleft, flushright)
+        for _ in range(5):
+            text = re.sub(
+                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\n\n\1\n\n',
+                text,
+                flags=re.DOTALL
+            )
+        for env in ('center', 'flushleft', 'flushright'):
+            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
+
         # Blockquotes
         env_quote = re.compile(r'\\begin\{(?:quote|quotation|verse)\}\s*(.*?)\s*\\end\{(?:quote|quotation|verse)\}', re.DOTALL)
         text = env_quote.sub(lambda m: "\n\n" + "\n".join([f"> {l}" if l.strip() else ">" for l in m.group(1).strip().splitlines()]) + "\n\n", text)
         text = re.sub(r'\\begin\{(?:center|abstract)\}\s*(.*?)\s*\\end\{(?:center|abstract)\}', r'\1', text, flags=re.DOTALL)
         text = re.sub(r'\\(?:begin|end)\{[^}]+\}', '', text)
         text = re.sub(r'\\item(?:\s*\[[^\]]*\])?\s*', '- ', text)
+
+        # Polices et tailles de police
+        text = re.sub(r'\\fontsize\{[^{}]*\}\{[^{}]*\}\s*(?:\\selectfont)?', '', text)
+        text = re.sub(r'\\selectfont\b', '', text)
+        text = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', '', text)
+        text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
 
         for _ in range(3):
             text = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'**\1**', text)
@@ -129,10 +146,38 @@ class DiffEngine:
             text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
             text = re.sub(r'\\underline\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
+        # Espacements et sauts
         text = re.sub(r'\\label\{[^}]+\}', '', text)
-        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|small|footnotesize|scriptsize|large|Large|LARGE|huge|Huge|sffamily|ttfamily|rmfamily|bfseries|itshape)\b', '', text)
+        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|raggedleft|raggedright)\b', '', text)
+        text = re.sub(r'\\needspace(?:\{[^{}]*\}|\[[^\]]*\])?', '', text)
         text = re.sub(r'\\(?:vspace|hspace|setlength|addtolength)\*?\{[^}]*\}(?:\{[^}]*\})?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
+        text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
+
+        # Règles et couleurs
+        text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
+        text = re.sub(r'\\rule(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\color(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+
+        # Configuration et métadonnées parasites
+        text = re.sub(r'\\titleformat\*?\{[^{}]*\}(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}(?:\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\titlespacing\*?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\setlist(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\hypersetup\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\the(?:sub)*section\b', '', text)
+
+        # Caractères et symboles spéciaux
+        text = re.sub(r'\\textbar\b', '|', text)
+        text = re.sub(r'\\quad\b', ' ', text)
+        text = re.sub(r'\\qquad\b', '  ', text)
+        text = re.sub(r'\\textsuperscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        text = re.sub(r'\\textsubscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        text = re.sub(r'\\rightarrow\b', '->', text)
+        text = re.sub(r'\\leftarrow\b', '<-', text)
+        text = re.sub(r'\\\\(?:\[[^\]]*\])?', '\n', text)
+
         text = re.sub(r'\\(?:newcommand|renewcommand|providecommand)\*?\s*\{\\[a-zA-Z]+\}(?:\[\d+\])?\{.*?\}', '', text, flags=re.DOTALL)
         text = re.sub(r'\\nocite\*?(?:\{[^}]*\})?', '', text)
         text = re.sub(r'\\(?:bibliography|bibliographystyle)(?:\{[^}]*\}|[a-zA-Z0-9_-]+)?', '', text)
@@ -146,6 +191,11 @@ class DiffEngine:
         text = re.sub(r'\\+\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\\+\s*\|', '|', text)
         text = re.sub(r'^\s*---\s*$', '', text, flags=re.MULTILINE)
+
+        # Nettoyage des accolades résiduelles de groupement
+        for _ in range(3):
+            text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
+
         text = re.sub(r'[ \t]{2,}', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()

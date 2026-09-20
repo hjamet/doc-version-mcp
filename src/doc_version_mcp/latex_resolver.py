@@ -15,20 +15,34 @@ class BibTexParser:
     @staticmethod
     def decode_latex_accents(text: str) -> str:
         text = text.replace(r'{\L}', 'Ł').replace(r'{\l}', 'ł')
-        text = text.replace(r'\"u', 'ü').replace(r'{\"u}', 'ü')
-        text = text.replace(r'\"o', 'ö').replace(r'{\"o}', 'ö')
-        text = text.replace(r'\"a', 'ä').replace(r'{\"a}', 'ä')
-        text = text.replace(r'\'e', 'é').replace(r'{\'e}', 'é')
-        text = text.replace(r'\`e', 'è').replace(r'{\`e}', 'è')
-        text = text.replace(r'\^e', 'ê').replace(r'{\^e}', 'ê')
-        text = text.replace(r'\'a', 'á').replace(r'{\'a}', 'á')
-        text = text.replace(r'\'u', 'ú').replace(r'{\'u}', 'ú')
-        text = text.replace(r'\'i', 'í').replace(r'{\'i}', 'í')
-        text = text.replace(r'\'o', 'ó').replace(r'{\'o}', 'ó')
+        text = text.replace(r'\"u', 'ü').replace(r'{\"u}', 'ü').replace(r'\"{u}', 'ü')
+        text = text.replace(r'\"o', 'ö').replace(r'{\"o}', 'ö').replace(r'\"{o}', 'ö')
+        text = text.replace(r'\"a', 'ä').replace(r'{\"a}', 'ä').replace(r'\"{a}', 'ä')
+        text = text.replace(r'\"e', 'ë').replace(r'{\"e}', 'ë').replace(r'\"{e}', 'ë')
+        text = text.replace(r'\'e', 'é').replace(r'{\'e}', 'é').replace(r'\'{e}', 'é')
+        text = text.replace(r'\`e', 'è').replace(r'{\`e}', 'è').replace(r'\`{e}', 'è')
+        text = text.replace(r'\^e', 'ê').replace(r'{\^e}', 'ê').replace(r'\^{e}', 'ê')
+        text = text.replace(r'\'a', 'á').replace(r'{\'a}', 'á').replace(r'\'{a}', 'á')
+        text = text.replace(r'\`a', 'à').replace(r'{\`a}', 'à').replace(r'\`{a}', 'à')
+        text = text.replace(r'\^a', 'â').replace(r'{\^a}', 'â').replace(r'\^{a}', 'â')
+        text = text.replace(r'\'u', 'ú').replace(r'{\'u}', 'ú').replace(r'\'{u}', 'ú')
+        text = text.replace(r'\`u', 'ù').replace(r'{\`u}', 'ù').replace(r'\`{u}', 'ù')
+        text = text.replace(r'\^u', 'û').replace(r'{\^u}', 'û').replace(r'\^{u}', 'û')
+        text = text.replace(r'\'i', 'í').replace(r'{\'i}', 'í').replace(r'\'{i}', 'í').replace(r'\'{\i}', 'í')
+        text = text.replace(r'\`i', 'ì').replace(r'{\`i}', 'ì').replace(r'\`{i}', 'ì').replace(r'\`{\i}', 'ì')
+        text = text.replace(r'\^i', 'î').replace(r'{\^i}', 'î').replace(r'\^{i}', 'î').replace(r'\^{\i}', 'î')
+        text = text.replace(r'\"i', 'ï').replace(r'{\"i}', 'ï').replace(r'\"{i}', 'ï').replace(r'\"{\i}', 'ï')
+        text = text.replace(r'\'o', 'ó').replace(r'{\'o}', 'ó').replace(r'\'{o}', 'ó')
+        text = text.replace(r'\`o', 'ò').replace(r'{\`o}', 'ò').replace(r'\`{o}', 'ò')
+        text = text.replace(r'\^o', 'ô').replace(r'{\^o}', 'ô').replace(r'\^{o}', 'ô')
         text = text.replace(r'\~n', 'ñ').replace(r'{\~n}', 'ñ')
         text = text.replace(r'\c{c}', 'ç').replace(r'{\c{c}}', 'ç')
-        text = text.replace(r'\ss', 'ß')
-        text = re.sub(r'[\{\}]', '', text)
+        text = text.replace(r'\c{C}', 'Ç').replace(r'{\c{C}}', 'Ç')
+        text = text.replace(r'\ss', 'ß').replace(r'{\ss}', 'ß')
+        text = text.replace(r'\oe', 'œ').replace(r'{\oe}', 'œ')
+        text = text.replace(r'\OE', 'Œ').replace(r'{\OE}', 'Œ')
+        text = text.replace(r'\ae', 'æ').replace(r'{\ae}', 'æ')
+        text = text.replace(r'\AE', 'Æ').replace(r'{\AE}', 'Æ')
         text = re.sub(r'\\&', '&', text)
         return text
 
@@ -58,6 +72,7 @@ class BibTexParser:
                 f_name = f_match.group(1).strip().lower()
                 f_val = f_match.group(2).strip()
                 f_val = self.decode_latex_accents(f_val)
+                f_val = re.sub(r'[\{\}]', '', f_val)
                 fields[f_name] = f_val
 
             self.entries[key] = fields
@@ -224,16 +239,18 @@ class LatexToMarkdownConverter:
 
     def __init__(
         self,
-        root_tex_path: Path,
+        root_tex_path: Optional[Path] = None,
         bib_parser: Optional[BibTexParser] = None,
         base_dir: Optional[Path] = None,
-        output_path: Optional[Path] = None
+        output_path: Optional[Path] = None,
+        raw_content: Optional[str] = None
     ):
-        self.root_path = root_tex_path.resolve()
-        self.root_dir = base_dir.resolve() if base_dir else self.root_path.parent
+        self.root_path = root_tex_path.resolve() if root_tex_path else None
+        self.root_dir = base_dir.resolve() if base_dir else (self.root_path.parent if self.root_path else Path.cwd())
         self.bib_parser = bib_parser or BibTexParser()
         self.output_path = output_path.resolve() if output_path else None
         self.paper_slug = self.output_path.stem if self.output_path else ""
+        self.raw_content = raw_content
         self.cited_keys: List[str] = []
         self.title: str = ""
         self.authors: str = ""
@@ -242,6 +259,24 @@ class LatexToMarkdownConverter:
         self.metadata: Dict[str, str] = {}
         self.macros: Dict[str, Dict[str, Any]] = {}
         self.brain_dir: Optional[Path] = None
+
+    @classmethod
+    def convert_text(
+        cls,
+        text: str,
+        base_dir: Optional[Path] = None,
+        bib_parser: Optional[BibTexParser] = None
+    ) -> str:
+        """Convertit directement une chaîne LaTeX en Markdown propre."""
+        if not text or not text.strip():
+            return ""
+        converter = cls(
+            root_tex_path=None,
+            bib_parser=bib_parser,
+            base_dir=base_dir,
+            raw_content=text
+        )
+        return converter.convert()
 
     def resolve_inputs(self, tex_file: Path, visited: Optional[Set[Path]] = None) -> str:
         """Résout récursivement les \\input, \\include, \\subfile, \\import avec détection de cycles."""
@@ -415,13 +450,16 @@ class LatexToMarkdownConverter:
 
         p = Path(clean_path)
         base_dirs = [
-            self.root_path.parent,
             self.root_dir,
-            self.root_path.parent / "figures",
             self.root_dir / "figures",
-            self.root_path.parent / "assets",
             self.root_dir / "assets",
         ]
+        if self.root_path:
+            base_dirs.extend([
+                self.root_path.parent,
+                self.root_path.parent / "figures",
+                self.root_path.parent / "assets",
+            ])
 
         found_target: Optional[Path] = None
         check_exts = [".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf"]
@@ -636,8 +674,17 @@ class LatexToMarkdownConverter:
         return text
 
     def convert_environments(self, text: str) -> str:
-        """Convertit abstract, quote, tcolorbox, algorithms."""
-        text = re.sub(r'\\begin\{center\}(.*?)\\end\{center\}', r'\1', text, flags=re.DOTALL)
+        """Convertit minipage, abstract, quote, tcolorbox, center, etc."""
+        for _ in range(5):
+            text = re.sub(
+                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\n\n\1\n\n',
+                text,
+                flags=re.DOTALL
+            )
+
+        for env in ('center', 'flushleft', 'flushright'):
+            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
 
         env_names = r'(?:abstract|quote|quotation|verse)'
         def parse_quote(m):
@@ -646,6 +693,60 @@ class LatexToMarkdownConverter:
 
         for _ in range(2):
             text = re.sub(rf'\\begin\{{({env_names})\}}(?:\[[^\]]*\])?(.*?)\\end\{{\1\}}', parse_quote, text, flags=re.DOTALL)
+        return text
+
+    def clean_layout_formatting(self, text: str) -> str:
+        """Filtre et nettoie les commandes et balises de mise en page LaTeX brutes."""
+        # 1. Environnements de mise en page (minipage, center, flushleft, flushright)
+        for _ in range(5):
+            text = re.sub(
+                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\n\n\1\n\n',
+                text,
+                flags=re.DOTALL
+            )
+        for env in ('center', 'flushleft', 'flushright'):
+            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
+
+        # 2. Polices et tailles de police
+        text = re.sub(r'\\fontsize\{[^{}]*\}\{[^{}]*\}\s*(?:\\selectfont)?', '', text)
+        text = re.sub(r'\\selectfont\b', '', text)
+        text = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', '', text)
+        text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
+
+        # 3. Espacements verticaux/horizontaux et règles de séparation
+        text = re.sub(r'\\vspace\*?\{[^{}]*\}', '\n\n', text)
+        text = re.sub(r'\\hspace\*?\{[^{}]*\}', ' ', text)
+        text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
+        text = re.sub(r'\\(?:pagebreak|clearpage|newpage|vfill|hfill|noindent|centering|raggedleft|raggedright|frenchspacing)\b', ' ', text)
+        text = re.sub(r'\\needspace(?:\{[^{}]*\}|\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\(?:setlength|addtolength)\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
+
+        # 4. Règles et couleurs
+        text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
+        text = re.sub(r'\\rule(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\color(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+
+        # 5. Configuration et métadonnées parasites
+        text = re.sub(r'\\titleformat\*?\{[^{}]*\}(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}(?:\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\titlespacing\*?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\setlist(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\hypersetup\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\the(?:sub)*section\b', '', text)
+
+        # 6. Caractères et symboles spéciaux
+        text = re.sub(r'\\textbar\b', '|', text)
+        text = re.sub(r'\\quad\b', ' ', text)
+        text = re.sub(r'\\qquad\b', '  ', text)
+        text = re.sub(r'\\textsuperscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        text = re.sub(r'\\textsubscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        text = re.sub(r'\\rightarrow\b', '->', text)
+        text = re.sub(r'\\leftarrow\b', '<-', text)
+        text = re.sub(r'\\\\(?:\[[^\]]*\])?', '\n', text)
+
         return text
 
     def clean_inline_formatting(self, text: str) -> str:
@@ -693,6 +794,10 @@ class LatexToMarkdownConverter:
 
         for token, math_content in math_map.items():
             text = text.replace(token, math_content)
+
+        # Nettoyage des accolades résiduelles de groupement
+        for _ in range(3):
+            text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
 
         return text
 
@@ -758,9 +863,12 @@ class LatexToMarkdownConverter:
 
     def convert(self) -> str:
         """Pipeline complet de conversion."""
-        raw_text = self.resolve_inputs(self.root_path)
+        if self.root_path and self.root_path.exists():
+            raw_text = self.resolve_inputs(self.root_path)
+        else:
+            raw_text = self.raw_content or ""
 
-        if not self.bib_parser.entries:
+        if not self.bib_parser.entries and self.root_dir and self.root_dir.exists():
             for bib_file in self.root_dir.glob("*.bib"):
                 self.bib_parser.load_bib_file(bib_file)
 
@@ -776,13 +884,15 @@ class LatexToMarkdownConverter:
         body = self.convert_lists(body)
         body = self.convert_environments(body)
         body = self.convert_headings(body)
+        body = self.clean_layout_formatting(body)
         body = self.clean_inline_formatting(body)
+        body = self.clean_layout_formatting(body)
         body = self.format_paragraphs(body)
 
         doc_parts = []
         if self.title:
             doc_parts.append(f"# {self.title}\n")
-        else:
+        elif self.root_path:
             doc_parts.append(f"# {self.root_path.stem}\n")
 
         if self.authors:

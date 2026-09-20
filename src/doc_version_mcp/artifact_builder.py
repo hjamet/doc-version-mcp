@@ -106,7 +106,8 @@ def estimate_ai_score(text: str) -> float:
     if not text or not text.strip():
         return 0.0
 
-    clean_text = re.sub(r'<[^>]+>', ' ', text).strip()
+    from .diff_engine import DiffEngine
+    clean_text = DiffEngine.clean_residual_latex(re.sub(r'<[^>]+>', ' ', text)).strip()
     words = re.findall(r'\b[a-zA-ZÀ-ÿ-]+\b', clean_text.lower())
     if len(words) < 5:
         return 5.0
@@ -329,7 +330,8 @@ class ArtifactBuilder:
             meta.append(f"<!-- SOURCE_FILE: {source_file} -->")
         if baseline_commit:
             meta.append(f"<!-- BASELINE_COMMIT: {baseline_commit[:8]} -->")
-        meta.append(f"<!-- Generated at: {now_str} -->\n\n")
+        meta.append(f"<!-- Generated at: {now_str} -->\n")
+        meta.append("<style>\nins { text-decoration: none !important; -webkit-text-decoration: none !important; text-decoration-line: none !important; }\ndel { text-decoration: line-through !important; }\n</style>\n\n")
 
         parts.append("\n".join(meta))
         return "".join(parts)
