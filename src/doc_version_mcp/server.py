@@ -137,6 +137,8 @@ def get_diff_artifact(
         # Détermination du nom cible propre
         if artifact_name and artifact_name.strip():
             raw_target_name = artifact_name.strip()
+            if raw_target_name.lower().endswith(".md"):
+                raw_target_name = raw_target_name[:-3]
         else:
             raw_target_name = Path(target).stem or "document"
         target_name = re.sub(r'[^a-zA-Z0-9_\-]+', '_', raw_target_name).strip('_') or "document"
