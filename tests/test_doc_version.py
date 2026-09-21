@@ -602,3 +602,50 @@ def test_span_diff_end_to_end_and_multiline():
     tb, ta = DiffEngine.extract_paragraph_diff_texts(para_diff)
     assert tb == "Texte avec suppression et ici."
     assert ta == "Texte avec et ajout ici."
+
+
+def test_git_upstream_baseline_when_ahead(tmp_path, monkeypatch):
+    """Valide que si HEAD est en avance sur son upstream (@{u}), la baseline choisie est le commit upstream."""
+    import subprocess
+    import json
+    from doc_version_mcp.cas_engine import CASEngine
+    from doc_version_mcp.server import get_diff_artifact
+    import doc_version_mcp.server as srv
+
+    test_cas = CASEngine(storage_dir=tmp_path / "cas")
+    monkeypatch.setattr(srv, "cas", test_cas)
+
+    # Créer un dépôt remote (bare) et un dépôt local
+    remote_repo = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote_repo)], check=True, capture_output=True)
+
+    local_repo = tmp_path / "local"
+    subprocess.run(["git", "clone", str(remote_repo), str(local_repo)], check=True, capture_output=True)
+
+    subprocess.run(["git", "-C", str(local_repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(local_repo), "config", "user.email", "test@example.com"], check=True)
+
+    doc_file = local_repo / "doc.md"
+    doc_file.write_text("Version Overleaf originale.\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(local_repo), "add", "doc.md"], check=True)
+    subprocess.run(["git", "-C", str(local_repo), "commit", "-m", "Initial commit on overleaf"], check=True)
+    subprocess.run(["git", "-C", str(local_repo), "push", "origin", "HEAD:main"], check=True)
+    subprocess.run(["git", "-C", str(local_repo), "branch", "--set-upstream-to=origin/main"], check=True)
+
+    # Maintenant, faire 2 commits locaux en avance sur origin/main
+    doc_file.write_text("Version Overleaf originale.\nAjout commit 1.\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(local_repo), "commit", "-am", "Commit 1 local"], check=True)
+
+    doc_file.write_text("Version Overleaf originale.\nAjout commit 1.\nAjout commit 2 final.\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(local_repo), "commit", "-am", "Commit 2 local"], check=True)
+
+    # get_diff_artifact sans from_commit_id doit comparer contre origin/main (l'upstream), pas HEAD~1
+    res = json.loads(get_diff_artifact(
+        target=str(doc_file),
+        diff_explanation="Diff global par rapport à la version distante"
+    ))
+    assert res["status"] == "success"
+    assert "Ajout commit 1." in res["artifact_content"]
+    assert "Ajout commit 2 final." in res["artifact_content"]
+    assert "Version Overleaf originale." in res["artifact_content"]
+

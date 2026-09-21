@@ -152,6 +152,29 @@ def get_git_file_content(repo_root: Path, rel_path: str, rev: str = "HEAD") -> O
         return None
 
 
+def get_git_upstream_commit(repo_root: Path) -> Optional[str]:
+    """Récupère le commit de l'upstream (ex. origin/main sur Overleaf) si HEAD est en avance."""
+    try:
+        res_u = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--verify", "@{u}"],
+            capture_output=True, text=True, timeout=5
+        )
+        if res_u.returncode != 0 or not res_u.stdout.strip():
+            return None
+        upstream_id = res_u.stdout.strip()
+        res_count = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-list", "--count", f"{upstream_id}..HEAD"],
+            capture_output=True, text=True, timeout=5
+        )
+        if res_count.returncode == 0:
+            count = int(res_count.stdout.strip() or "0")
+            if count > 0:
+                return upstream_id
+        return None
+    except Exception:
+        return None
+
+
 @mcp.tool()
 def get_diff_artifact(
     target: str,
@@ -285,20 +308,29 @@ def get_diff_artifact(
                 head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
                 latest_git_id = git_commits[0]["commit_id"]
 
-                # Règle d'or Henri : Si l'état actuel est déjà commité dans HEAD,
-                # comparer avec HEAD~1 pour afficher les changements du commit !
-                if head_text is not None and current_raw and current_raw.strip() == head_text.strip():
-                    parent_rev = "HEAD~1"
-                    parent_text = get_git_file_content(repo_root, rel_git_path, parent_rev)
-                    if parent_text is not None:
-                        old_text = parent_text
-                        baseline_commit_id = git_commits[1]["commit_id"] if len(git_commits) > 1 else "HEAD~1"
+                # Détection d'un upstream (ex: origin/main sur Overleaf) si la branche locale est en avance
+                upstream_id = get_git_upstream_commit(repo_root)
+                if upstream_id:
+                    upstream_text = get_git_file_content(repo_root, rel_git_path, upstream_id)
+                    if upstream_text is not None:
+                        old_text = upstream_text
+                        baseline_commit_id = upstream_id[:8]
+
+                if not old_text:
+                    # Règle d'or Henri : Si l'état actuel est déjà commité dans HEAD,
+                    # comparer avec HEAD~1 pour afficher les changements du commit !
+                    if head_text is not None and current_raw and current_raw.strip() == head_text.strip():
+                        parent_rev = "HEAD~1"
+                        parent_text = get_git_file_content(repo_root, rel_git_path, parent_rev)
+                        if parent_text is not None:
+                            old_text = parent_text
+                            baseline_commit_id = git_commits[1]["commit_id"] if len(git_commits) > 1 else "HEAD~1"
+                        else:
+                            old_text = head_text
+                            baseline_commit_id = latest_git_id
                     else:
-                        old_text = head_text
+                        old_text = head_text if head_text is not None else ""
                         baseline_commit_id = latest_git_id
-                else:
-                    old_text = head_text if head_text is not None else ""
-                    baseline_commit_id = latest_git_id
             else:
                 if cas_snaps:
                     candidate_id = cas_snaps[0]["commit_id"]
