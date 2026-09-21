@@ -30,12 +30,12 @@ class DiffEngine:
     USER_COMMENTS_HEADER = "## 💬 Commentaires & Retours d'Arbitrage"
 
     # Style Auteur Local / Agent (vert doux épuré / rouge doux)
-    DEL_STYLE_LOCAL = 'style="background-color:#fee2e2; color:#991b1b; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
-    INS_STYLE_LOCAL = 'style="background-color:#dcfce7; color:#166534; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
+    DEL_STYLE_LOCAL = 'style="background-color: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px;"'
+    INS_STYLE_LOCAL = 'style="background-color: #dcfce7; color: #166534; padding: 2px 4px; border-radius: 3px;"'
 
     # Style Collaborateurs (bleu ciel pour ajouts, ambre doux pour suppressions)
-    DEL_STYLE_COLLAB = 'style="background-color:#ffedd5; color:#9a3412; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
-    INS_STYLE_COLLAB = 'style="background-color:#dbeafe; color:#1e40af; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
+    DEL_STYLE_COLLAB = 'style="background-color: #ffedd5; color: #9a3412; padding: 2px 4px; border-radius: 3px;"'
+    INS_STYLE_COLLAB = 'style="background-color: #dbeafe; color: #1e40af; padding: 2px 4px; border-radius: 3px;"'
 
     SECTION_ALIASES = {
         'the llm network game': 'the latent space',
@@ -238,11 +238,11 @@ class DiffEngine:
 
         # Supprimer le texte balisé en suppression
         text = re.sub(r'<del\b[^>]*>.*?</del>', '', text, flags=re.DOTALL)
-        text = re.sub(r'<span\b[^>]*style="[^"]*#fee2e2[^"]*"[^>]*>.*?</span>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>.*?</span>', '', text, flags=re.DOTALL)
 
         # Déballer le texte balisé en ajout
         text = re.sub(r'<ins\b[^>]*>(.*?)</ins>', r'\1', text, flags=re.DOTALL)
-        text = re.sub(r'<span\b[^>]*style="[^"]*#dcfce7[^"]*"[^>]*>(.*?)</span>', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', r'\1', text, flags=re.DOTALL)
         text = re.sub(r'</?span[^>]*>', '', text)
 
         lines = text.splitlines()
@@ -357,21 +357,21 @@ class DiffEngine:
 
     @classmethod
     def sanitize_table_pipes_in_diff(cls, lines: List[str]) -> List[str]:
-        """Empêche les balises ins/del de traverser les pipes d'un tableau Markdown."""
+        """Empêche les balises de diff de traverser les pipes d'un tableau Markdown."""
         cleaned_lines = []
         for l in lines:
             if re.search(r'\|\s*:?-{2,}:?\s*\|', l):
-                clean_l = re.sub(r'</?(?:ins|del)[^>]*>', '', l)
+                clean_l = re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', l)
                 cleaned_lines.append(clean_l)
             elif l.strip().startswith('|') or (l.strip().startswith('>') and '|' in l):
-                clean_l = re.sub(r'(<(?:ins|del)[^>]*>)([^<]*?)\|([^<]*?)(<\/(?:ins|del)>)', r'\1\2\4 | \1\3\4', l)
+                clean_l = re.sub(r'(<(ins|del|span)\b[^>]*>)([^<]*?)\|([^<]*?)(<\/\2>)', r'\1\3\5 | \1\4\5', l)
                 cleaned_lines.append(clean_l)
             else:
                 cleaned_lines.append(l)
         return cleaned_lines
 
     @classmethod
-    def wrap_inline_block(cls, text: str, tag: str, style: str, extra_attrs: str = "") -> str:
+    def wrap_inline_block(cls, text: str, tag: str = "span", style: str = "", extra_attrs: str = "") -> str:
         """Enrobe le texte dans <tag style="...">...</tag> en préservant les préfixes Markdown."""
         lines = text.splitlines(keepends=True)
         wrapped_lines = []
@@ -391,14 +391,14 @@ class DiffEngine:
                 content = content[len(prefix):]
 
             if content.strip():
-                wrapped_lines.append(f"{prefix}<{tag} {full_attrs}><span {style}>{content}</span></{tag}>{line_ending}")
+                wrapped_lines.append(f"{prefix}<{tag} {full_attrs}>{content}</{tag}>{line_ending}")
             else:
                 wrapped_lines.append(f"{prefix}{content}{line_ending}")
         return "".join(wrapped_lines)
 
     @classmethod
     def format_del(cls, text: str, is_collab: bool = False, author: str = "") -> str:
-        """Enrobe un texte supprimé dans un <del> stylisé."""
+        """Enrobe un texte supprimé dans un <span> stylisé."""
         if not text:
             return ""
         if '![' in text and '](' in text:
@@ -414,14 +414,14 @@ class DiffEngine:
 
         if '\n\n' in core:
             paras = core.split('\n\n')
-            wrapped_paras = [cls.wrap_inline_block(p, "del", active_style, extra) if p.strip() else p for p in paras]
+            wrapped_paras = [cls.wrap_inline_block(p, "span", active_style, extra) if p.strip() else p for p in paras]
             return leading_ws + '\n\n'.join(wrapped_paras) + trailing_ws
 
-        return leading_ws + cls.wrap_inline_block(core, "del", active_style, extra) + trailing_ws
+        return leading_ws + cls.wrap_inline_block(core, "span", active_style, extra) + trailing_ws
 
     @classmethod
     def format_ins(cls, text: str, is_collab: bool = False, author: str = "") -> str:
-        """Enrobe un texte ajouté dans un <ins> stylisé."""
+        """Enrobe un texte ajouté dans un <span> stylisé."""
         if not text:
             return ""
         if '![' in text and '](' in text:
@@ -437,10 +437,10 @@ class DiffEngine:
 
         if '\n\n' in core:
             paras = core.split('\n\n')
-            wrapped_paras = [cls.wrap_inline_block(p, "ins", active_style, extra) if p.strip() else p for p in paras]
+            wrapped_paras = [cls.wrap_inline_block(p, "span", active_style, extra) if p.strip() else p for p in paras]
             return leading_ws + '\n\n'.join(wrapped_paras) + trailing_ws
 
-        return leading_ws + cls.wrap_inline_block(core, "ins", active_style, extra) + trailing_ws
+        return leading_ws + cls.wrap_inline_block(core, "span", active_style, extra) + trailing_ws
 
     @classmethod
     def diff_section_lines(
@@ -711,21 +711,21 @@ class DiffEngine:
                     else:
                         in_deleted_callout = False
 
-                ins_matches = re.findall(r'<ins\b[^>]*>(.*?)</ins>', line, flags=re.DOTALL)
-                del_matches = re.findall(r'<del\b[^>]*>(.*?)</del>', line, flags=re.DOTALL)
+                ins_matches = re.findall(r'<ins\b[^>]*>(.*?)</ins>|<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', line, flags=re.DOTALL)
+                del_matches = re.findall(r'<del\b[^>]*>(.*?)</del>|<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', line, flags=re.DOTALL)
                 val_count += (len(ins_matches) + len(del_matches))
 
                 clean_line = re.sub(r'<del\b[^>]*>.*?</del>', '', line)
-                clean_line = re.sub(r'<span\b[^>]*style="[^"]*#fee2e2[^"]*"[^>]*>.*?</span>', '', clean_line)
+                clean_line = re.sub(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>.*?</span>', '', clean_line)
                 clean_line = re.sub(r'<ins\b[^>]*>(.*?)</ins>', r'\1', clean_line)
-                clean_line = re.sub(r'<span\b[^>]*style="[^"]*#dcfce7[^"]*"[^>]*>(.*?)</span>', r'\1', clean_line)
+                clean_line = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', r'\1', clean_line)
                 clean_line = re.sub(r'</?span[^>]*>', '', clean_line)
                 clean_line = re.sub(r'[ \t]{2,}', ' ', clean_line)
                 validated_lines.append(clean_line)
             else:
                 in_deleted_callout = False
-                ins_matches = re.findall(r'<ins\b[^>]*>(.*?)</ins>', line, flags=re.DOTALL)
-                del_matches = re.findall(r'<del\b[^>]*>(.*?)</del>', line, flags=re.DOTALL)
+                ins_matches = re.findall(r'<ins\b[^>]*>(.*?)</ins>|<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', line, flags=re.DOTALL)
+                del_matches = re.findall(r'<del\b[^>]*>(.*?)</del>|<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', line, flags=re.DOTALL)
                 rem_count += (len(ins_matches) + len(del_matches))
                 validated_lines.append(line)
 
@@ -744,18 +744,18 @@ class DiffEngine:
 
         tb = cleaned
         tb = re.sub(r'<ins\b[^>]*>.*?</ins>', '', tb, flags=re.DOTALL)
-        tb = re.sub(r'<span\b[^>]*style="[^"]*#dcfce7[^"]*"[^>]*>.*?</span>', '', tb, flags=re.DOTALL)
+        tb = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>.*?</span>', '', tb, flags=re.DOTALL)
         tb = re.sub(r'<del\b[^>]*>(.*?)</del>', r'\1', tb, flags=re.DOTALL)
-        tb = re.sub(r'<span\b[^>]*style="[^"]*#fee2e2[^"]*"[^>]*>(.*?)</span>', r'\1', tb, flags=re.DOTALL)
+        tb = re.sub(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', r'\1', tb, flags=re.DOTALL)
         tb = re.sub(r'</?(?:span|del|ins|br)\b[^>]*>', '', tb)
         tb = re.sub(r'\n+', ' ', tb)
         tb = re.sub(r'[ \t]{2,}', ' ', tb).strip()
 
         ta = cleaned
         ta = re.sub(r'<del\b[^>]*>.*?</del>', '', ta, flags=re.DOTALL)
-        ta = re.sub(r'<span\b[^>]*style="[^"]*#fee2e2[^"]*"[^>]*>(.*?)</span>', '', ta, flags=re.DOTALL)
+        ta = re.sub(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', '', ta, flags=re.DOTALL)
         ta = re.sub(r'<ins\b[^>]*>(.*?)</ins>', r'\1', ta, flags=re.DOTALL)
-        ta = re.sub(r'<span\b[^>]*style="[^"]*#dcfce7[^"]*"[^>]*>(.*?)</span>', r'\1', ta, flags=re.DOTALL)
+        ta = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', r'\1', ta, flags=re.DOTALL)
         ta = re.sub(r'</?(?:span|del|ins|br)\b[^>]*>', '', ta)
         ta = re.sub(r'\n+', ' ', ta)
         ta = re.sub(r'[ \t]{2,}', ' ', ta).strip()

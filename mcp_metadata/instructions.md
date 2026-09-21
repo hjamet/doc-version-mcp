@@ -13,7 +13,7 @@ Le serveur MCP `doc-version` gère le cycle de vie documentaire, le versionnage 
 
 2. **Double Mode d'Analyse Différentielle** :
    - **Mode `paper`** : Adapté aux manuscrits scientifiques LaTeX et Markdown académique. Intègre la projection AST, la détection des blocs de formules KaTeX, et l'évaluation de conformité stylistique / anti-IA ($P(\text{AI}) < 0.10$).
-   - **Mode `draft`** : Adapté à la relecture chirurgicale de brouillons. Traque les balises d'incertitude `<XXX>`, calcule le mot-à-mot différentiel coloré (`<ins>` / `<del>`) et surveille le seuil de rétention textuelle ($\ge 90\%$).
+   - **Mode `draft`** : Adapté à la relecture chirurgicale de brouillons. Traque les balises d'incertitude `<XXX>`, calcule le mot-à-mot différentiel coloré (`<span>` vert / rouge) et surveille le seuil de rétention textuelle ($\ge 90\%$).
 
 3. **Garantie Zéro Conflit Non Résolu** :
    - Synchronisation amont avant édition (`record_git_pull_event`) avec `git pull --rebase` et autostash.

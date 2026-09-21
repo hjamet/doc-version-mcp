@@ -131,7 +131,10 @@ def test_diff_engine_ast_and_katex():
     assert diff_count >= 1
     assert "$E = mc^2$" in annotated_body
     assert "Introduction" in mod_sections
-    assert "<ins" in annotated_body
+    assert "<span" in annotated_body
+    assert "#dcfce7" in annotated_body
+    assert "<ins" not in annotated_body
+    assert "<del" not in annotated_body
     assert "robust" in annotated_body
 
 
@@ -407,32 +410,53 @@ def test_preamble_institutional_header_no_false_deltas():
     assert "Préambule" not in mod_sections
     assert "Introduction & Préambule" not in mod_sections
 
-    # 2. Les lignes d'en-tête institutionnel ne doivent PAS être marquées en <ins> ou <del>
+    # 2. Les lignes d'en-tête institutionnel ne doivent PAS être marquées en diff
     preamble_part = annotated_body.split("## Objectifs")[0]
     assert "<ins" not in preamble_part
     assert "<del" not in preamble_part
+    assert "#dcfce7" not in preamble_part
+    assert "#fee2e2" not in preamble_part
 
     # 3. Seule la section Objectifs doit contenir le diff
     assert any("Objectifs" in s for s in mod_sections)
-    assert "<ins" in annotated_body.split("## Objectifs")[1]
+    objectifs_part = annotated_body.split("## Objectifs")[1]
+    assert "<span" in objectifs_part
+    assert "#dcfce7" in objectifs_part
+    assert "<ins" not in annotated_body
+    assert "<del" not in annotated_body
 
 
 def test_del_ins_no_strikethrough_no_underline():
-    """Valide que <del> n'est pas barré et <ins> n'est pas souligné (couleur seule)."""
-    assert "text-decoration:none !important;" in DiffEngine.DEL_STYLE_LOCAL
+    """Valide que les diffs utilisent des balises <span> sans rature ni soulignement (couleur seule)."""
+    assert DiffEngine.DEL_STYLE_LOCAL == 'style="background-color: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px;"'
+    assert DiffEngine.INS_STYLE_LOCAL == 'style="background-color: #dcfce7; color: #166534; padding: 2px 4px; border-radius: 3px;"'
+    assert DiffEngine.DEL_STYLE_COLLAB == 'style="background-color: #ffedd5; color: #9a3412; padding: 2px 4px; border-radius: 3px;"'
+    assert DiffEngine.INS_STYLE_COLLAB == 'style="background-color: #dbeafe; color: #1e40af; padding: 2px 4px; border-radius: 3px;"'
+
     assert "line-through" not in DiffEngine.DEL_STYLE_LOCAL
-    assert "text-decoration:none !important;" in DiffEngine.DEL_STYLE_COLLAB
     assert "line-through" not in DiffEngine.DEL_STYLE_COLLAB
+    assert "underline" not in DiffEngine.INS_STYLE_LOCAL
+    assert "underline" not in DiffEngine.INS_STYLE_COLLAB
 
-    assert "text-decoration:none !important;" in DiffEngine.INS_STYLE_LOCAL
-    assert "text-decoration:none !important;" in DiffEngine.INS_STYLE_COLLAB
-
+    # Formatage local
     del_html = DiffEngine.format_del("texte supprimé")
+    assert del_html == '<span style="background-color: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px;">texte supprimé</span>'
+    assert "<del" not in del_html
     assert "line-through" not in del_html
-    assert "text-decoration:none !important;" in del_html
 
     ins_html = DiffEngine.format_ins("texte ajouté")
-    assert "text-decoration:none !important;" in ins_html
+    assert ins_html == '<span style="background-color: #dcfce7; color: #166534; padding: 2px 4px; border-radius: 3px;">texte ajouté</span>'
+    assert "<ins" not in ins_html
+    assert "underline" not in ins_html
+
+    # Formatage collaborateur
+    del_collab = DiffEngine.format_del("suppression collab", is_collab=True, author="Alice")
+    assert del_collab == '<span style="background-color: #ffedd5; color: #9a3412; padding: 2px 4px; border-radius: 3px;" title="Supprimé par Alice">suppression collab</span>'
+    assert "<del" not in del_collab
+
+    ins_collab = DiffEngine.format_ins("ajout collab", is_collab=True, author="Alice")
+    assert ins_collab == '<span style="background-color: #dbeafe; color: #1e40af; padding: 2px 4px; border-radius: 3px;" title="Ajouté par Alice">ajout collab</span>'
+    assert "<ins" not in ins_collab
 
 
 def test_artifact_builder_no_style_tag_leak():
@@ -553,4 +577,28 @@ def test_git_sync_and_default_diff_with_latest_commit(tmp_path, monkeypatch):
     assert "cours de travail" in content_b
 
 
+def test_span_diff_end_to_end_and_multiline():
+    """Valide de bout en bout l'absence totale de <del> / <ins> et le bon fonctionnement de validate_revisions et extract_paragraph."""
+    old_p = "Premier paragraphe avec ancien texte.\n\n> Citation avec ancienne phrase."
+    new_p = "Premier paragraphe avec nouveau texte.\n\n> Citation avec nouvelle phrase."
 
+    body, toc, count, secs = DiffEngine.generate_diff_annotated_body(old_p, new_p)
+    assert count >= 1
+    assert "<del" not in body
+    assert "<ins" not in body
+    assert '<span style="background-color: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px;">' in body
+    assert '<span style="background-color: #dcfce7; color: #166534; padding: 2px 4px; border-radius: 3px;">' in body
+
+    # Validation sélective via validate_revisions_up_to_line
+    validated_text, val_count, rem_count = DiffEngine.validate_revisions_up_to_line(body, commit_line=100)
+    assert val_count >= 1
+    assert "<span" not in validated_text
+    assert "<del" not in validated_text
+    assert "<ins" not in validated_text
+    assert "nouveau texte" in validated_text
+
+    # Extraction avant / après
+    para_diff = 'Texte avec <span style="background-color: #fee2e2; color: #991b1b; padding: 2px 4px; border-radius: 3px;">suppression</span> et <span style="background-color: #dcfce7; color: #166534; padding: 2px 4px; border-radius: 3px;">ajout</span> ici.'
+    tb, ta = DiffEngine.extract_paragraph_diff_texts(para_diff)
+    assert tb == "Texte avec suppression et ici."
+    assert ta == "Texte avec et ajout ici."
