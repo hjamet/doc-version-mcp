@@ -105,7 +105,9 @@ class CASEngine:
         author: str = "agent",
         is_pinned: bool = False,
         content: Optional[str] = None,
-        mode: str = "paper"
+        mode: str = "paper",
+        commit_id: Optional[str] = None,
+        timestamp: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Crée un instantané dans le CAS.
@@ -132,14 +134,17 @@ class CASEngine:
         targets_map = index_data.setdefault("targets", {})
         parent_id = targets_map.get(norm_target)
 
-        now_utc = datetime.now(timezone.utc).isoformat()
+        now_utc = timestamp if timestamp else datetime.now(timezone.utc).isoformat()
 
         # Construction du commit ID
-        commit_seed = f"{norm_target}|{now_utc}|{blob_hash}|{message}|{author}|{parent_id or ''}".encode("utf-8")
-        commit_id = hashlib.sha256(commit_seed).hexdigest()
+        if commit_id:
+            actual_commit_id = commit_id
+        else:
+            commit_seed = f"{norm_target}|{now_utc}|{blob_hash}|{message}|{author}|{parent_id or ''}".encode("utf-8")
+            actual_commit_id = hashlib.sha256(commit_seed).hexdigest()
 
         commit_record = {
-            "commit_id": commit_id,
+            "commit_id": actual_commit_id,
             "target": norm_target,
             "message": message,
             "author": author,
@@ -152,11 +157,11 @@ class CASEngine:
             "parent_commit_id": parent_id
         }
 
-        commit_file = self.commits_dir / f"{commit_id}.json"
+        commit_file = self.commits_dir / f"{actual_commit_id}.json"
         commit_file.write_text(json.dumps(commit_record, indent=2, ensure_ascii=False), encoding="utf-8")
 
         # Mise à jour de l'index
-        targets_map[norm_target] = commit_id
+        targets_map[norm_target] = actual_commit_id
         self._save_index(index_data)
 
         return commit_record
@@ -179,11 +184,10 @@ class CASEngine:
         raw_bytes = self._read_blob(blob_hash)
         text_content = raw_bytes.decode("utf-8", errors="replace")
 
-        dest_path_str = target_file if target_file else commit_data.get("target")
-        if dest_path_str:
-            dest_p = Path(dest_path_str)
+        if target_file:
+            dest_p = Path(target_file)
             # Ne pas écrire sur disque si c'est un nom virtuel sans dossier et qui n'existe pas
-            if dest_p.is_absolute() or "/" in dest_path_str or "\\" in dest_path_str:
+            if dest_p.is_absolute() or "/" in target_file or "\\" in target_file:
                 dest_p.parent.mkdir(parents=True, exist_ok=True)
                 dest_p.write_text(text_content, encoding="utf-8")
 
@@ -226,10 +230,10 @@ class CASEngine:
         for f in self.commits_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-                c_target = data.get("target", "").lower()
+                c_target = data.get("target", "").replace("\\", "/").lower()
                 c_mode = data.get("mode", "").lower()
 
-                if norm_target and (norm_target not in c_target):
+                if norm_target and (norm_target not in c_target and c_target not in norm_target and Path(norm_target).name != Path(c_target).name):
                     continue
                 if mode and (mode.lower() != c_mode):
                     continue

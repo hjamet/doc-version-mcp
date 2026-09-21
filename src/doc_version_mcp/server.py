@@ -8,7 +8,7 @@ import re
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple, Union
 
 from fastmcp import FastMCP
 
@@ -66,6 +66,91 @@ def commit_document(
         return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
 
+def get_git_repo_info(file_path: Union[str, Path]) -> Tuple[bool, Optional[Path], Optional[str]]:
+    """Détecte si un fichier se trouve dans un dépôt Git valide et retourne (is_git, repo_root, rel_path)."""
+    if not file_path:
+        return False, None, None
+    p = Path(file_path)
+    if not p.is_absolute():
+        p = p.resolve()
+    work_dir = p.parent if (p.is_file() or not p.exists()) else p
+    if not work_dir.exists():
+        return False, None, None
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(work_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode != 0 or res.stdout.strip() != "true":
+            return False, None, None
+
+        root_res = subprocess.run(
+            ["git", "-C", str(work_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5
+        )
+        if root_res.returncode != 0:
+            return False, None, None
+
+        repo_root = Path(root_res.stdout.strip()).resolve()
+        try:
+            rel_path = p.relative_to(repo_root).as_posix()
+        except ValueError:
+            rel_path = p.name
+        return True, repo_root, rel_path
+    except Exception:
+        return False, None, None
+
+
+def get_git_commits(repo_root: Path, rel_path: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Récupère les N derniers commits Git pour le fichier (ou le dépôt)."""
+    try:
+        cmd = [
+            "git", "-C", str(repo_root), "log",
+            f"-{limit}",
+            "--format=%H|%an|%aI|%s",
+            "--", rel_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+
+        if not lines:
+            cmd_head = [
+                "git", "-C", str(repo_root), "log",
+                f"-{limit}",
+                "--format=%H|%an|%aI|%s"
+            ]
+            res_head = subprocess.run(cmd_head, capture_output=True, text=True, timeout=10)
+            lines = [l.strip() for l in res_head.stdout.splitlines() if l.strip()]
+
+        commits = []
+        for l in lines:
+            parts = l.split("|", 3)
+            if len(parts) >= 4:
+                commits.append({
+                    "commit_id": parts[0],
+                    "author": parts[1],
+                    "timestamp": parts[2],
+                    "message": parts[3]
+                })
+        return commits
+    except Exception:
+        return []
+
+
+def get_git_file_content(repo_root: Path, rel_path: str, rev: str = "HEAD") -> Optional[str]:
+    """Extrait le contenu d'un fichier à une révision Git donnée."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f"{rev}:{rel_path}"],
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace"
+        )
+        if res.returncode == 0:
+            return res.stdout
+        return None
+    except Exception:
+        return None
+
+
 @mcp.tool()
 def get_diff_artifact(
     target: str,
@@ -80,48 +165,169 @@ def get_diff_artifact(
     """
     Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.
     Supporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).
+    Synchronise automatiquement avec les commits Git si le fichier est dans un dépôt Git.
     """
     try:
         old_text = ""
         new_text = ""
         baseline_commit_id = from_commit_id
 
-        # 1. Résolution de old_text
-        if from_commit_id:
-            old_text = cas.restore_snapshot(from_commit_id)
-        else:
-            # Chercher le dernier snapshot pour target
-            snaps = cas.list_snapshots(target=target, limit=2)
-            if snaps:
-                old_text = cas.restore_snapshot(snaps[0]["commit_id"])
-                baseline_commit_id = snaps[0]["commit_id"]
+        target_path = Path(target) if target else None
+        if target_path and not target_path.is_absolute():
+            target_path = target_path.resolve()
 
-        # 2. Résolution de new_text
+        base_dir = None
+        if target_path:
+            if target_path.is_file():
+                base_dir = target_path.parent
+            elif target_path.is_dir():
+                base_dir = target_path
+            elif target_path.parent.exists():
+                base_dir = target_path.parent
+
+        # Détection Git
+        is_git, repo_root, rel_git_path = (False, None, None)
+        if target_path:
+            is_git, repo_root, rel_git_path = get_git_repo_info(target_path)
+
+        # Contenu actuel sur le disque
+        disk_content = None
+        if target_path and target_path.exists() and target_path.is_file():
+            disk_content = target_path.read_text(encoding="utf-8", errors="replace")
+
+        # 1. Résolution de new_text
         if to_commit_id:
             new_text = cas.restore_snapshot(to_commit_id)
         elif content:
             new_text = content
+        elif disk_content is not None:
+            new_text = disk_content
         else:
-            # Lire depuis le fichier cible sur disque
-            p = Path(target)
-            if not p.is_absolute():
-                p = p.resolve()
-            if p.exists() and p.is_file():
-                if p.suffix.lower() == ".tex":
-                    converter = LatexToMarkdownConverter(p)
-                    new_text = converter.convert()
+            new_text = ""
+
+        # 2. Résolution de old_text & synchronisation Git / CAS
+        if from_commit_id:
+            # Support des alias 'v0' et 'baseline'
+            resolved_from_id = from_commit_id
+            if from_commit_id.lower() in ("v0", "baseline"):
+                cas_snaps_all = cas.list_snapshots(target=target, limit=50)
+                if not cas_snaps_all and target_path:
+                    cas_snaps_all = cas.list_snapshots(target=target_path.as_posix(), limit=50)
+                baseline_cand = next(
+                    (c for c in cas_snaps_all if "baseline" in str(c.get("message", "")).lower() or "v0" in str(c.get("message", "")).lower()),
+                    None
+                )
+                if baseline_cand:
+                    resolved_from_id = baseline_cand["commit_id"]
+
+            try:
+                old_text = cas.restore_snapshot(resolved_from_id)
+                baseline_commit_id = resolved_from_id
+            except (FileNotFoundError, ValueError):
+                if is_git and repo_root and rel_git_path:
+                    git_text = get_git_file_content(repo_root, rel_git_path, resolved_from_id)
+                    if git_text is not None:
+                        old_text = git_text
+                        baseline_commit_id = resolved_from_id
+                if not old_text:
+                    raise FileNotFoundError(f"Commit baseline introuvable dans CAS et Git : {from_commit_id}")
+        else:
+            # Pas de from_commit_id explicite : synchronisation automatique Git / CAS
+            git_commits = get_git_commits(repo_root, rel_git_path, limit=10) if (is_git and repo_root and rel_git_path) else []
+            cas_snaps = cas.list_snapshots(target=target, limit=10)
+            if not cas_snaps and target_path:
+                cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=10)
+
+            # Synchroniser les commits Git récents dans le CAS s'ils sont absents
+            if git_commits and repo_root and rel_git_path:
+                for gc in git_commits:
+                    try:
+                        cas.get_commit(gc["commit_id"][:8])
+                    except (FileNotFoundError, ValueError):
+                        c_text = get_git_file_content(repo_root, rel_git_path, gc["commit_id"])
+                        if c_text is not None:
+                            try:
+                                cas.create_snapshot(
+                                    target=str(target_path or target),
+                                    message=gc["message"],
+                                    author=gc["author"],
+                                    content=c_text,
+                                    mode=mode,
+                                    is_pinned=False,
+                                    commit_id=gc["commit_id"][:8],
+                                    timestamp=gc["timestamp"]
+                                )
+                            except Exception:
+                                pass
+
+            # Arbitrage entre Git et CAS avec parsing d'horodatage robuste
+            def parse_iso_ts(ts_str: str) -> float:
+                if not ts_str:
+                    return 0.0
+                try:
+                    return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    return 0.0
+
+            use_git_baseline = False
+            if git_commits and repo_root and rel_git_path:
+                latest_git = git_commits[0]
+                latest_git_ts = parse_iso_ts(latest_git.get("timestamp", ""))
+                latest_cas_ts = parse_iso_ts(cas_snaps[0].get("timestamp", "")) if cas_snaps else 0.0
+                if not cas_snaps or latest_git_ts >= latest_cas_ts:
+                    use_git_baseline = True
+
+            current_raw = content if content else (disk_content if disk_content is not None else "")
+
+            if use_git_baseline and repo_root and rel_git_path and git_commits:
+                head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
+                latest_git_id = git_commits[0]["commit_id"]
+
+                # Règle d'or Henri : Si l'état actuel est déjà commité dans HEAD,
+                # comparer avec HEAD~1 pour afficher les changements du commit !
+                if head_text is not None and current_raw and current_raw.strip() == head_text.strip():
+                    parent_rev = "HEAD~1"
+                    parent_text = get_git_file_content(repo_root, rel_git_path, parent_rev)
+                    if parent_text is not None:
+                        old_text = parent_text
+                        baseline_commit_id = git_commits[1]["commit_id"] if len(git_commits) > 1 else "HEAD~1"
+                    else:
+                        old_text = head_text
+                        baseline_commit_id = latest_git_id
                 else:
-                    new_text = p.read_text(encoding="utf-8", errors="replace")
+                    old_text = head_text if head_text is not None else ""
+                    baseline_commit_id = latest_git_id
             else:
-                new_text = old_text
+                if cas_snaps:
+                    candidate_id = cas_snaps[0]["commit_id"]
+                    cand_text = cas.restore_snapshot(candidate_id)
+
+                    # Si le snapshot 0 est déjà identique au texte actuel, basculer sur le commit précédent ou baseline v0
+                    if cand_text and current_raw and current_raw.strip() == cand_text.strip() and len(cas_snaps) > 1:
+                        baseline_cand = next(
+                            (c for c in cas_snaps[1:] if "baseline" in str(c.get("message", "")).lower() or "v0" in str(c.get("message", "")).lower() or c.get("is_pinned")),
+                            None
+                        )
+                        if baseline_cand:
+                            old_text = cas.restore_snapshot(baseline_cand["commit_id"])
+                            baseline_commit_id = baseline_cand["commit_id"]
+                        else:
+                            old_text = cas.restore_snapshot(cas_snaps[1]["commit_id"])
+                            baseline_commit_id = cas_snaps[1]["commit_id"]
+                    else:
+                        old_text = cand_text
+                        baseline_commit_id = candidate_id
+                elif git_commits and repo_root and rel_git_path:
+                    head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
+                    old_text = head_text if head_text is not None else ""
+                    baseline_commit_id = git_commits[0]["commit_id"]
 
         # Si pas d'ancienne version, considérer baseline vide ou identique
         if not old_text:
             old_text = new_text
 
         # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou contenu LaTeX détecté
-        target_path = Path(target) if target else None
-        base_dir = target_path.parent if (target_path and target_path.exists()) else None
+        b_dir = Path(brain_dir) if brain_dir else None
 
         def is_latex_doc(t: str) -> bool:
             if not t:
@@ -129,10 +335,10 @@ def get_diff_artifact(
             return bool(re.search(r'\\(?:documentclass|begin\{document\}|section|subsection|begin\{minipage\}|usepackage|begin\{table|fontsize|selectfont|hrule|vspace)\b', t))
 
         if is_latex_doc(old_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in old_text):
-            old_text = LatexToMarkdownConverter.convert_text(old_text, base_dir=base_dir)
+            old_text = LatexToMarkdownConverter.convert_text(old_text, base_dir=base_dir, brain_dir=b_dir)
 
         if is_latex_doc(new_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in new_text):
-            new_text = LatexToMarkdownConverter.convert_text(new_text, base_dir=base_dir)
+            new_text = LatexToMarkdownConverter.convert_text(new_text, base_dir=base_dir, brain_dir=b_dir)
 
         # Détermination du nom cible propre
         if artifact_name and artifact_name.strip():
@@ -156,8 +362,10 @@ def get_diff_artifact(
             author_name="agent"
         )
 
-        # Récupération des 5 derniers commits depuis le CAS
+        # Récupération des 5 derniers commits depuis le CAS (incluant les commits Git synchronisés)
         recent_commits = cas.list_snapshots(target=target, limit=5)
+        if not recent_commits and target_path:
+            recent_commits = cas.list_snapshots(target=target_path.as_posix(), limit=5)
         if not recent_commits:
             recent_commits = cas.list_snapshots(limit=5)
 
@@ -170,19 +378,30 @@ def get_diff_artifact(
             source_file=target,
             baseline_commit=baseline_commit_id,
             recent_commits=recent_commits,
-            enable_ai_score=True,
             final_content=new_text,
             mode=mode
         )
 
-        # Sauvegarde dans brain_dir si fourni
+        # Sauvegarde dans brain_dir si fourni & formatage des images
         saved_path = None
         if brain_dir:
             b_dir = Path(brain_dir)
-            if b_dir.exists() and b_dir.is_dir():
-                art_file = b_dir / f"{target_name}.md"
-                art_file.write_text(artifact_content, encoding="utf-8")
-                saved_path = art_file.as_posix()
+            b_dir.mkdir(parents=True, exist_ok=True)
+            artifact_content = ArtifactBuilder.format_images_for_brain(
+                artifact_content,
+                brain_target_dir=b_dir,
+                source_dir=base_dir
+            )
+            art_file = b_dir / f"{target_name}.md"
+            art_file.write_text(artifact_content, encoding="utf-8")
+            saved_path = art_file.as_posix()
+        else:
+            # Si pas de brain_dir, s'assurer que toute image wikilink est convertie en markdown standard
+            def repl_wikilink_clean(m):
+                raw = m.group(1).split('|')[0].strip()
+                alt = Path(raw).stem.replace('_', ' ')
+                return f"![{alt}]({Path(raw).name})"
+            artifact_content = re.sub(r'!\[\[(.*?)\]\]', repl_wikilink_clean, artifact_content)
 
         res_data = {
             "status": "success",
@@ -208,12 +427,36 @@ def restore_commit(
     dry_run: bool = False
 ) -> str:
     """
-    Restaure un document depuis son commit ID dans le CAS.
+    Restaure un document depuis son commit ID dans le CAS ou Git.
     Si dry_run=True, prévisualise sans modifier le disque.
     """
     try:
-        commit_data = cas.get_commit(commit_id)
-        content = cas.restore_snapshot(commit_id, target_file=target if not dry_run else None)
+        commit_data = None
+        try:
+            commit_data = cas.get_commit(commit_id)
+        except (FileNotFoundError, ValueError):
+            if target:
+                is_git, repo_root, rel_git_path = get_git_repo_info(target)
+                if is_git and repo_root and rel_git_path:
+                    git_text = get_git_file_content(repo_root, rel_git_path, commit_id)
+                    if git_text is not None:
+                        cas_rec = cas.create_snapshot(
+                            target=target,
+                            message=f"Git snapshot {commit_id[:8]}",
+                            author="git",
+                            content=git_text,
+                            is_pinned=True,
+                            commit_id=commit_id[:8]
+                        )
+                        commit_data = cas_rec
+
+        if not commit_data:
+            raise FileNotFoundError(f"Commit introuvable : {commit_id}")
+
+        target_to_write = None
+        if not dry_run:
+            target_to_write = target if target else commit_data.get("target")
+        content = cas.restore_snapshot(commit_data["commit_id"], target_file=target_to_write)
 
         return json.dumps({
             "status": "success",
@@ -235,8 +478,33 @@ def list_commits(
 ) -> str:
     """
     Liste les commits stockés dans le CAS avec métadonnées d'horodatage et auteur.
+    Synchronise automatiquement les commits Git si la cible est dans un dépôt Git.
     """
     try:
+        if target:
+            is_git, repo_root, rel_git_path = get_git_repo_info(target)
+            if is_git and repo_root and rel_git_path:
+                git_commits = get_git_commits(repo_root, rel_git_path, limit=limit)
+                for gc in git_commits:
+                    try:
+                        cas.get_commit(gc["commit_id"][:8])
+                    except (FileNotFoundError, ValueError):
+                        c_text = get_git_file_content(repo_root, rel_git_path, gc["commit_id"])
+                        if c_text is not None:
+                            try:
+                                cas.create_snapshot(
+                                    target=target,
+                                    message=gc["message"],
+                                    author=gc["author"],
+                                    content=c_text,
+                                    mode=mode or "paper",
+                                    is_pinned=False,
+                                    commit_id=gc["commit_id"][:8],
+                                    timestamp=gc["timestamp"]
+                                )
+                            except Exception:
+                                pass
+
         commits = cas.list_snapshots(target=target, limit=limit, mode=mode)
         summary = []
         for c in commits:

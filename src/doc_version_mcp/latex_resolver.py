@@ -243,7 +243,8 @@ class LatexToMarkdownConverter:
         bib_parser: Optional[BibTexParser] = None,
         base_dir: Optional[Path] = None,
         output_path: Optional[Path] = None,
-        raw_content: Optional[str] = None
+        raw_content: Optional[str] = None,
+        brain_dir: Optional[Path] = None
     ):
         self.root_path = root_tex_path.resolve() if root_tex_path else None
         self.root_dir = base_dir.resolve() if base_dir else (self.root_path.parent if self.root_path else Path.cwd())
@@ -258,14 +259,15 @@ class LatexToMarkdownConverter:
         self.abstract: str = ""
         self.metadata: Dict[str, str] = {}
         self.macros: Dict[str, Dict[str, Any]] = {}
-        self.brain_dir: Optional[Path] = None
+        self.brain_dir: Optional[Path] = brain_dir.resolve() if brain_dir else None
 
     @classmethod
     def convert_text(
         cls,
         text: str,
         base_dir: Optional[Path] = None,
-        bib_parser: Optional[BibTexParser] = None
+        bib_parser: Optional[BibTexParser] = None,
+        brain_dir: Optional[Path] = None
     ) -> str:
         """Convertit directement une chaîne LaTeX en Markdown propre."""
         if not text or not text.strip():
@@ -274,7 +276,8 @@ class LatexToMarkdownConverter:
             root_tex_path=None,
             bib_parser=bib_parser,
             base_dir=base_dir,
-            raw_content=text
+            raw_content=text,
+            brain_dir=brain_dir
         )
         return converter.convert()
 
@@ -499,6 +502,13 @@ class LatexToMarkdownConverter:
                 pass
 
         safe_name = found_target.name.replace(" ", "_")
+        if self.brain_dir and self.brain_dir.is_dir():
+            try:
+                dest_file = self.brain_dir / safe_name
+                if found_target.resolve() != dest_file.resolve():
+                    shutil.copy2(found_target, dest_file)
+            except Exception:
+                pass
         return safe_name
 
     @staticmethod
@@ -632,16 +642,30 @@ class LatexToMarkdownConverter:
                 for im in img_matches:
                     raw_p = im.group(1).strip().strip('"{}\'')
                     safe_name = self.resolve_image_path(raw_p)
-                    img_blocks.append(f"![[{safe_name}]]")
+                    if self.brain_dir and self.brain_dir.is_dir():
+                        b_posix = self.brain_dir.resolve().as_posix().lstrip('/')
+                        img_blocks.append(f"![{clean_cap}](file:///{b_posix}/{safe_name})")
+                    else:
+                        img_blocks.append(f"![{clean_cap}]({safe_name})")
                 imgs_str = "\n\n".join(img_blocks)
                 return f"\n\n> [!NOTE] **🖼️ Figure : {clean_cap}**\n\n{imgs_str}\n\n"
 
             return f"\n\n> [!NOTE] **🖼️ Figure : {clean_cap}**\n\n"
 
         text = re.sub(r'\\begin\{figure\*?\}.*?\\end\{figure\*?\}', parse_figure, text, flags=re.DOTALL)
+
+        def repl_isolated_img(m):
+            raw_target = m.group(1).strip().strip('"{}\'')
+            safe_name = self.resolve_image_path(raw_target)
+            alt = Path(raw_target).stem.replace('_', ' ')
+            if self.brain_dir and self.brain_dir.is_dir():
+                b_posix = self.brain_dir.resolve().as_posix().lstrip('/')
+                return f"\n\n![{alt}](file:///{b_posix}/{safe_name})\n\n"
+            return f"\n\n![{alt}]({safe_name})\n\n"
+
         text = re.sub(
             r'\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}',
-            lambda m: f"\n\n![[{self.resolve_image_path(m.group(1))}]]\n\n",
+            repl_isolated_img,
             text
         )
         return text
@@ -892,8 +916,6 @@ class LatexToMarkdownConverter:
         doc_parts = []
         if self.title:
             doc_parts.append(f"# {self.title}\n")
-        elif self.root_path:
-            doc_parts.append(f"# {self.root_path.stem}\n")
 
         if self.authors:
             doc_parts.append(f"**Auteurs :** {self.authors}\n")

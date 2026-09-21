@@ -30,11 +30,11 @@ class DiffEngine:
     USER_COMMENTS_HEADER = "## 💬 Commentaires & Retours d'Arbitrage"
 
     # Style Auteur Local / Agent (vert doux épuré / rouge doux)
-    DEL_STYLE_LOCAL = 'style="background-color:#fee2e2; color:#991b1b; text-decoration:line-through; padding:1px 3px; border-radius:3px;"'
+    DEL_STYLE_LOCAL = 'style="background-color:#fee2e2; color:#991b1b; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
     INS_STYLE_LOCAL = 'style="background-color:#dcfce7; color:#166534; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
 
     # Style Collaborateurs (bleu ciel pour ajouts, ambre doux pour suppressions)
-    DEL_STYLE_COLLAB = 'style="background-color:#ffedd5; color:#9a3412; text-decoration:line-through; padding:1px 3px; border-radius:3px;"'
+    DEL_STYLE_COLLAB = 'style="background-color:#ffedd5; color:#9a3412; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
     INS_STYLE_COLLAB = 'style="background-color:#dbeafe; color:#1e40af; font-weight:normal; text-decoration:none !important; -webkit-text-decoration:none !important; text-decoration-line:none !important; padding:1px 3px; border-radius:3px;"'
 
     SECTION_ALIASES = {
@@ -185,12 +185,10 @@ class DiffEngine:
         text = re.sub(r'\\xspace\s*([,.:;!?\'"\)\}\]])', r'\1', text)
         text = re.sub(r'\\xspace\b\s*', ' ', text)
         text = text.replace('~', ' ').replace(r'\,', ' ').replace(r'\&', '&').replace(r'\_', '_').replace(r'\#', '#').replace(r'\%', '%')
-        text = text.replace('``', '"').replace("''", '"')
-        text = re.sub(r'(?<![:|\-])---(?![:|\-])', '—', text)
-        text = re.sub(r'(?<![:|\-])--(?![:|\-])', '–', text)
+        text = re.sub(r'(?<![\n:|\-])---(?![\n:|\-])', '—', text)
+        text = re.sub(r'(?<![\n:|\-])--(?![\n:|\-])', '–', text)
         text = re.sub(r'\\+\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\\+\s*\|', '|', text)
-        text = re.sub(r'^\s*---\s*$', '', text, flags=re.MULTILINE)
 
         # Nettoyage des accolades résiduelles de groupement
         for _ in range(3):
@@ -604,6 +602,10 @@ class DiffEngine:
         for new_sec in new_sections:
             norm = new_sec.normalized_title
             matching_old = cls.find_matching_section(norm, old_sec_map, used_old_secs)
+            if matching_old is None and new_sec is new_sections[0] and old_sections and old_sections[0] not in used_old_secs:
+                # Alignement systématique de l'en-tête / préambule initial pour éviter tout faux delta
+                matching_old = old_sections[0]
+
             if matching_old:
                 used_old_secs.add(matching_old)
 

@@ -12,7 +12,7 @@ from doc_version_mcp.cas_engine import CASEngine
 from doc_version_mcp.diff_engine import DiffEngine, SectionBlock
 from doc_version_mcp.latex_resolver import LatexMacroEngine, LatexToMarkdownConverter, BibTexParser
 from doc_version_mcp.draft_engine import DraftEngine
-from doc_version_mcp.artifact_builder import ArtifactBuilder, format_ai_score_badge
+from doc_version_mcp.artifact_builder import ArtifactBuilder
 from doc_version_mcp.server import (
     commit_document,
     get_diff_artifact,
@@ -218,16 +218,6 @@ def test_bibtex_parser(tmp_path):
     assert "2017" in cit
 
 
-def test_ai_score_badge_formatting():
-    """Valide la structure HTML des badges pill pour le score Anti-IA."""
-    badge_green = format_ai_score_badge(15.0, 4.2)
-    assert "background-color:#f0fdf4" in badge_green
-    assert "Conforme" in badge_green
-
-    badge_red = format_ai_score_badge(5.0, 45.0)
-    assert "background-color:#fef2f2" in badge_red
-
-
 def test_fastmcp_server_tools(temp_cas_dir, monkeypatch):
     """Valide l'exécution directe des 6 outils FastMCP exposés par server.py."""
     # Rediriger le stockage CAS du serveur vers un répertoire temporaire
@@ -280,8 +270,8 @@ def test_fastmcp_server_tools(temp_cas_dir, monkeypatch):
     assert res_git["status"] == "error"
 
 
-def test_artifact_builder_recent_commits_and_ai_badges(temp_cas_dir, monkeypatch):
-    """Valide l'intégration du tableau des 5 derniers commits, des badges de score IA, et l'exclusion formelle de la note d'audit et du tableau de justification."""
+def test_artifact_builder_recent_commits_and_no_ai_badges(temp_cas_dir, monkeypatch):
+    """Valide l'intégration du tableau des 5 derniers commits, l'exclusion formelle de l'IA, et le bloc dépliant draft."""
     test_cas = CASEngine(storage_dir=temp_cas_dir)
     monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
 
@@ -325,8 +315,9 @@ def test_artifact_builder_recent_commits_and_ai_badges(temp_cas_dir, monkeypatch
     assert "Baseline v0 original" in content
     assert "Revision v1 surgical polish" in content
 
-    # Invariant 3 : Présence du badge de score IA
-    assert "Score IA" in content or "Conformité Anti-IA" in content
+    # Invariant 3 : Exclusion formelle de tout badge ou calcul IA
+    assert "Score IA" not in content
+    assert "Conformité Anti-IA" not in content
 
     # Invariant 4 : Présence du bloc dépliant de texte final prêt à copier en mode draft
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in content
@@ -374,51 +365,192 @@ def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
     assert "```text" not in art_paper
 
 
-def test_clean_prose_for_ai_detection_strips_latex():
-    """Valide l'éradication des commandes et environnements LaTeX pour extraire la prose pure."""
-    from doc_version_mcp.artifact_builder import clean_prose_for_ai_detection
+def test_preamble_institutional_header_no_false_deltas():
+    """Valide que l'en-tête institutionnel / préambule sans titre H1 ne génère aucun faux delta ins."""
+    old_latex = r"""
+    \begin{document}
+    \begin{minipage}[c]{0.80\textwidth}
+        \textbf{Université de Lausanne} \textbar\ \textbf{Faculté des HEC} \\
+        Département des Systèmes d'Information (DESI) \textbar\ \textit{Applied AI Lab}
+    \end{minipage}
+    \begin{center}
+        \textbf{Rapport Scientifique et Financier : HEC Research Fund 2024-2025}
+    \end{center}
+    \section{Objectifs}
+    Texte initial de la section objectifs.
+    \end{document}
+    """
 
-    latex_snippet = (
-        r"\begin{minipage}{0.48\textwidth}" "\n"
-        r"\fontsize{10pt}{12pt}\selectfont" "\n"
-        r"\vspace{3mm}" "\n"
-        r"\textbf{Important :} Nous démontrons l'existence d'un équilibre robuste dans cet environnement dynamique." "\n"
-        r"\cite{jamet2026} and $E = mc^2$." "\n"
-        r"\end{minipage}"
+    new_latex = r"""
+    \begin{document}
+    \begin{minipage}[c]{0.80\textwidth}
+        \textbf{Université de Lausanne} \textbar\ \textbf{Faculté des HEC} \\
+        Département des Systèmes d'Information (DESI) \textbar\ \textit{Applied AI Lab}
+    \end{minipage}
+    \begin{center}
+        \textbf{Rapport Scientifique et Financier : HEC Research Fund 2024-2025}
+    \end{center}
+    \section{Objectifs}
+    Texte révisé et mis à jour de la section objectifs.
+    \end{document}
+    """
+
+    old_md = LatexToMarkdownConverter.convert_text(old_latex)
+    new_md = LatexToMarkdownConverter.convert_text(new_latex)
+
+    annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
+        old_text=old_md,
+        new_text=new_md
     )
 
-    clean_prose = clean_prose_for_ai_detection(latex_snippet)
-    assert r"\begin{minipage}" not in clean_prose
-    assert r"\end{minipage}" not in clean_prose
-    assert r"\fontsize" not in clean_prose
-    assert r"\selectfont" not in clean_prose
-    assert r"\vspace" not in clean_prose
-    assert r"\cite" not in clean_prose
-    assert "$E = mc^2$" not in clean_prose
-    assert "Nous démontrons l'existence d'un équilibre robuste" in clean_prose
+    # 1. L'en-tête ne doit pas apparaître dans les sections modifiées
+    assert "Préambule" not in mod_sections
+    assert "Introduction & Préambule" not in mod_sections
+
+    # 2. Les lignes d'en-tête institutionnel ne doivent PAS être marquées en <ins> ou <del>
+    preamble_part = annotated_body.split("## Objectifs")[0]
+    assert "<ins" not in preamble_part
+    assert "<del" not in preamble_part
+
+    # 3. Seule la section Objectifs doit contenir le diff
+    assert any("Objectifs" in s for s in mod_sections)
+    assert "<ins" in annotated_body.split("## Objectifs")[1]
 
 
-def test_fail_fast_ai_detector_missing_script(monkeypatch):
-    """Valide la doctrine Fail-Fast : lève immédiatement une exception si le détecteur est manquant (zéro 5.0%)."""
-    from doc_version_mcp.artifact_builder import estimate_ai_score
+def test_del_ins_no_strikethrough_no_underline():
+    """Valide que <del> n'est pas barré et <ins> n'est pas souligné (couleur seule)."""
+    assert "text-decoration:none !important;" in DiffEngine.DEL_STYLE_LOCAL
+    assert "line-through" not in DiffEngine.DEL_STYLE_LOCAL
+    assert "text-decoration:none !important;" in DiffEngine.DEL_STYLE_COLLAB
+    assert "line-through" not in DiffEngine.DEL_STYLE_COLLAB
 
-    # Forcer un chemin inexistant pour simuler une défaillance d'environnement
-    monkeypatch.setenv("AI_DETECTOR_PATH", r"C:\invalid\path\to\nonexistent_ai_detector.py")
+    assert "text-decoration:none !important;" in DiffEngine.INS_STYLE_LOCAL
+    assert "text-decoration:none !important;" in DiffEngine.INS_STYLE_COLLAB
 
-    with pytest.raises(FileNotFoundError) as exc_info:
-        estimate_ai_score("Ceci est une phrase de test pour valider la règle Fail-Fast.")
+    del_html = DiffEngine.format_del("texte supprimé")
+    assert "line-through" not in del_html
+    assert "text-decoration:none !important;" in del_html
 
-    assert "FAIL-FAST" in str(exc_info.value)
-    assert "introuvable" in str(exc_info.value)
+    ins_html = DiffEngine.format_ins("texte ajouté")
+    assert "text-decoration:none !important;" in ins_html
 
 
-def test_fail_fast_ai_detector_empty_text():
-    """Valide qu'un texte vide lève ValueError au lieu de simuler un score fictif."""
-    from doc_version_mcp.artifact_builder import estimate_ai_score
+def test_artifact_builder_no_style_tag_leak():
+    """Valide qu'aucun bloc <style> ne fuit dans l'artéfact."""
+    header = ArtifactBuilder.build_artifact_header(target_name="test_doc")
+    assert "<style>" not in header
+    assert "</style>" not in header
+    assert "line-through" not in header
 
-    with pytest.raises(ValueError) as exc_info:
-        estimate_ai_score(r"\begin{minipage}{0.5\textwidth}\vspace{1cm}\end{minipage}")
+    # Assemblage avec un style injecté dans le corps -> doit être éradiqué
+    artifact = ArtifactBuilder.assemble_brain_artifact(
+        target_name="test_doc",
+        annotated_body="<style>ins { color: red; }</style>\n\nCorps de test",
+        tree_toc="",
+        diff_count=0,
+        enable_ai_score=False
+    )
+    assert "<style>" not in artifact
+    assert "</style>" not in artifact
 
-    assert "FAIL-FAST" in str(exc_info.value)
+
+def test_image_copying_and_formatting_in_brain(tmp_path):
+    """Valide la copie physique des images et la réécriture file:/// vers brain_dir."""
+    src_dir = tmp_path / "source_docs"
+    src_dir.mkdir()
+    img_file = src_dir / "unil_logo.png"
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest")
+
+    brain_dir = tmp_path / "brain_target"
+    brain_dir.mkdir()
+
+    md_input = "Voici le logo wikilink : ![[unil_logo.png|800]] et standard : ![Logo](unil_logo.png)"
+    formatted = ArtifactBuilder.format_images_for_brain(
+        markdown_text=md_input,
+        brain_target_dir=brain_dir,
+        source_dir=src_dir
+    )
+
+    # 1. Le fichier doit avoir été copié dans brain_dir
+    copied_img = brain_dir / "unil_logo.png"
+    assert copied_img.exists()
+    assert copied_img.read_bytes() == img_file.read_bytes()
+
+    # 2. Le texte ne doit plus contenir de wikilink
+    assert "![[" not in formatted
+    # 3. Le texte doit pointer en file:/// vers brain_dir
+    b_posix = brain_dir.resolve().as_posix().lstrip('/')
+    assert f"file:///{b_posix}/unil_logo.png" in formatted
+
+
+def test_latex_convert_figures_markdown_standard(tmp_path):
+    """Valide que les figures LaTeX sont converties en Markdown standard et non en wikilinks."""
+    tex_snippet = r"""
+    \begin{figure}[h]
+    \centering
+    \includegraphics{figures/architecture.png}
+    \caption{Architecture Globale}
+    \end{figure}
+    """
+    converted = LatexToMarkdownConverter.convert_text(tex_snippet, base_dir=tmp_path)
+    assert "![[" not in converted
+    assert "![Architecture Globale](architecture.png)" in converted
+
+
+def test_git_sync_and_default_diff_with_latest_commit(tmp_path, monkeypatch):
+    """
+    Valide que doc-version détecte les dépôts Git, synchronise automatiquement
+    le dernier commit dans le CAS et compare par défaut contre HEAD ou HEAD~1.
+    """
+    import subprocess
+    repo_dir = tmp_path / "git_repo"
+    repo_dir.mkdir()
+
+    # 1. Initialiser le dépôt Git
+    subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test Henri"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "henri@test.ch"], check=True, capture_output=True)
+
+    doc_path = repo_dir / "document.md"
+
+    # Commit 1 : version initiale
+    doc_path.write_text("# Document\n\nVersion initiale du manuscrit.", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "document.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "Commit 1 initial"], check=True, capture_output=True)
+
+    # Commit 2 : version mise à jour
+    doc_path.write_text("# Document\n\nVersion retouchee du manuscrit.", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "document.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "Commit 2 polish"], check=True, capture_output=True)
+
+    test_cas = CASEngine(storage_dir=tmp_path / "cas_storage")
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    # Cas A : Le fichier sur disque est déjà commité (identique à HEAD)
+    # -> Le diff doit automatiquement comparer avec HEAD~1 (Commit 1) !
+    res_a = json.loads(get_diff_artifact(
+        target=str(doc_path),
+        diff_explanation="Diff automatique contre HEAD~1"
+    ))
+    assert res_a["status"] == "success"
+    assert res_a["diff_count"] >= 1
+    content_a = res_a["artifact_content"]
+    assert "initiale" in content_a
+    assert "retouchee" in content_a
+    assert "Commit 2 polish" in content_a
+
+    # Cas B : Des modifications non commitées sont présentes sur le disque
+    doc_path.write_text("# Document\n\nVersion 3 en cours de travail.", encoding="utf-8")
+    # -> Le diff doit automatiquement comparer contre HEAD (Commit 2) !
+    res_b = json.loads(get_diff_artifact(
+        target=str(doc_path),
+        diff_explanation="Diff modifications en cours contre HEAD"
+    ))
+    assert res_b["status"] == "success"
+    assert res_b["diff_count"] >= 1
+    content_b = res_b["artifact_content"]
+    assert "retouchee" in content_b
+    assert "cours de travail" in content_b
+
 
 
