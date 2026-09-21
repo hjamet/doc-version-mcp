@@ -17,6 +17,7 @@ from .diff_engine import DiffEngine
 from .latex_resolver import LatexToMarkdownConverter, BibTexParser
 from .draft_engine import DraftEngine
 from .artifact_builder import ArtifactBuilder
+from .style_guard import check_style
 
 # Instanciation du serveur FastMCP
 mcp = FastMCP(
@@ -160,7 +161,8 @@ def get_diff_artifact(
     to_commit_id: str = "",
     mode: str = "paper",
     brain_dir: str = "",
-    artifact_name: str = ""
+    artifact_name: str = "",
+    language: str = "auto"
 ) -> str:
     """
     Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.
@@ -355,6 +357,17 @@ def get_diff_artifact(
             retention = DraftEngine.calculate_retention(old_text, new_text)
             is_compliant = retention >= 90.0
 
+        # 3. Boucle bloquante déterministe avoid-ai-writing
+        soft_warnings = []
+        style_verdict = "PASS"
+        if new_text and new_text.strip():
+            style_res = check_style(new_text, language=language)
+            style_verdict = style_res.verdict
+            if style_res.verdict == "FAIL":
+                raise ValueError(style_res.error_report)
+            if style_res.verdict == "WARN":
+                soft_warnings = style_res.soft_warnings
+
         annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
             old_text=old_text,
             new_text=new_text,
@@ -379,7 +392,8 @@ def get_diff_artifact(
             baseline_commit=baseline_commit_id,
             recent_commits=recent_commits,
             final_content=new_text,
-            mode=mode
+            mode=mode,
+            soft_warnings=soft_warnings
         )
 
         # Sauvegarde dans brain_dir si fourni & formatage des images
@@ -409,7 +423,9 @@ def get_diff_artifact(
             "modified_sections": mod_sections,
             "baseline_commit": baseline_commit_id[:8] if baseline_commit_id else None,
             "saved_artifact_path": saved_path,
-            "artifact_content": artifact_content
+            "artifact_content": artifact_content,
+            "style_verdict": style_verdict,
+            "soft_warnings_count": len(soft_warnings)
         }
         if retention is not None:
             res_data["retention_percent"] = retention

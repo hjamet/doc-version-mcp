@@ -137,7 +137,8 @@ class ArtifactBuilder:
         recent_commits: Optional[List[Dict[str, Any]]] = None,
         enable_ai_score: bool = True,
         final_content: Optional[str] = None,
-        mode: str = "paper"
+        mode: str = "paper",
+        soft_warnings: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Assemble l'artéfact complet destiné à Antigravity Brain."""
         header = cls.build_artifact_header(
@@ -189,7 +190,23 @@ class ArtifactBuilder:
                 f"---\n\n"
             )
 
-        full_doc = f"{header}{copy_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
+        # 5. Bloc dépliant de recommandations stylistiques non-bloquantes (soft warnings dans le budget)
+        warnings_block = ""
+        if soft_warnings:
+            w_rows = [
+                f"<details><summary>💡 Recommandations Stylistiques Non-Bloquantes ({len(soft_warnings)} alertes)</summary>\n",
+                "| Type | Ligne | Terme / Motif | Suggestion |",
+                "| :--- | :--- | :--- | :--- |"
+            ]
+            for w in soft_warnings:
+                t = str(w.get("type", "Avertissement")).replace("|", "\\|")
+                l = f"Ligne {w.get('line', '—')}"
+                term = str(w.get("term", "")).replace("|", "\\|")
+                sug = str(w.get("suggestion", "")).replace("|", "\\|")
+                w_rows.append(f"| {t} | {l} | `{term}` | {sug} |")
+            warnings_block = "\n".join(w_rows) + "\n\n</details>\n\n---\n\n"
+
+        full_doc = f"{header}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
         if diff_explanation.strip():
             full_doc = cls.inject_explanation_callout(full_doc, diff_explanation.strip())
 
