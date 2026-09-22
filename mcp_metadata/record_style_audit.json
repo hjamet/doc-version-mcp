@@ -1,0 +1,32 @@
+{
+  "name": "record_style_audit",
+  "description": "Enregistre les métadonnées d'audit de style de la boucle avoid-ai-writing pour un commit donné (itérations K, problèmes identifiés à chaque tour, libellé synthétique).",
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "commit_id": {
+        "description": "Identifiant du commit CAS ou Git (SHA-256 ou préfixe)",
+        "type": "string"
+      },
+      "target": {
+        "default": "",
+        "description": "Chemin du fichier cible ou identifiant virtuel",
+        "type": "string"
+      },
+      "iterations": {
+        "default": "",
+        "description": "Tableau JSON d'itérations détaillées (numéro, verdict, total_issues, tier_breakdown, issues)",
+        "type": "string"
+      },
+      "summary": {
+        "default": "",
+        "description": "Libellé synthétique direct (ex: '2 itérations (T1: 3 pb ➔ T2: 0 pb - PASS)')",
+        "type": "string"
+      }
+    },
+    "required": [
+      "commit_id"
+    ],
+    "type": "object"
+  }
+}

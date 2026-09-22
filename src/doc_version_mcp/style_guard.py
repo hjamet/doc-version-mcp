@@ -11,8 +11,9 @@ import shutil
 import tempfile
 import subprocess
 from pathlib import Path
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 
 DEFAULT_DETECT_JS_PATHS = [
@@ -107,6 +108,40 @@ class StyleCheckResult:
     error_report: str = ""
     detected_language: str = "en"
 
+    def to_iteration_dict(self, iteration: int = 1) -> Dict[str, Any]:
+        """Convertit le résultat en dictionnaire d'itération structuré pour le suivi."""
+        tb: Dict[str, int] = {}
+        for hb in self.hard_blockers:
+            t = str(hb.get("type", "Hard Blocker"))
+            if "tier1" in t.lower():
+                tb["Tier 1"] = tb.get("Tier 1", 0) + 1
+            elif "em-dash" in t.lower():
+                tb["em-dash"] = tb.get("em-dash", 0) + 1
+            elif "transition" in t.lower():
+                tb["Transition"] = tb.get("Transition", 0) + 1
+            else:
+                tb["Hard Blocker"] = tb.get("Hard Blocker", 0) + 1
+
+        for sw in self.soft_warnings:
+            t = str(sw.get("type", "Soft Warning"))
+            if "tier2" in t.lower():
+                tb["Tier 2"] = tb.get("Tier 2", 0) + 1
+            elif "tier3" in t.lower():
+                tb["Tier 3"] = tb.get("Tier 3", 0) + 1
+            else:
+                tb["Soft Warning"] = tb.get("Soft Warning", 0) + 1
+
+        total = len(self.hard_blockers) + len(self.soft_warnings)
+        return {
+            "iteration": iteration,
+            "verdict": self.verdict,
+            "total_issues": total,
+            "hard_blockers": len(self.hard_blockers),
+            "soft_warnings": len(self.soft_warnings),
+            "tier_breakdown": tb,
+            "issues": list(self.hard_blockers) + list(self.soft_warnings)
+        }
+
 
 def detect_language(text: str) -> str:
     """Détecte la langue dominante (en ou fr) via un comptage de stop-words."""
@@ -184,17 +219,22 @@ def locate_line_in_text(text: str, pattern_or_term: str, is_regex: bool = False)
     return 1
 
 
-def scan_deterministic_hard_blockers(text: str, language: str) -> List[Dict[str, Any]]:
+def scan_deterministic_hard_blockers(
+    text: str,
+    language: str,
+    allowed_terms: Optional[set] = None
+) -> List[Dict[str, Any]]:
     """
     Exécute un scan déterministe absolu (Tolérance 0) pour :
     - em-dashes ('—', '--')
     - normalisation (ZWSP, homoglyphes cyrilliques/grecs)
     - transitions mécaniques strictes
-    - Tier 1A stricts
+    - Tier 1A stricts (sauf termes explicitement autorisés par l'utilisateur)
     """
     blockers = []
     lines = text.splitlines()
     in_code_block = False
+    terms_whitelist = allowed_terms or set()
 
     # 1. Scanner les em-dashes ligne par ligne
     for idx, line in enumerate(lines, start=1):
@@ -254,9 +294,14 @@ def scan_deterministic_hard_blockers(text: str, language: str) -> List[Dict[str,
     trans_dict = EN_MECHANICAL_TRANSITIONS if language == "en" else FR_MECHANICAL_TRANSITIONS
 
     for phrase, suggestion in trans_dict.items():
+        if phrase.lower() in terms_whitelist:
+            continue
         pattern = rf"\b{re.escape(phrase)}\b"
         matches = list(re.finditer(pattern, masked_text, re.IGNORECASE))
         for m in matches:
+            matched_w = m.group(0).lower()
+            if matched_w in terms_whitelist:
+                continue
             line_num = text[:m.start()].count("\n") + 1
             blockers.append({
                 "type": "Hard Blocker: Transition Mécanique",
@@ -267,9 +312,14 @@ def scan_deterministic_hard_blockers(text: str, language: str) -> List[Dict[str,
 
     # 3. Scanner les Tier 1A stricts
     for term, suggestion in TIER1A_TERMS.items():
+        if term.lower() in terms_whitelist:
+            continue
         pattern = rf"\b{re.escape(term)}\b"
         matches = list(re.finditer(pattern, masked_text, re.IGNORECASE))
         for m in matches:
+            matched_w = m.group(0).lower()
+            if matched_w in terms_whitelist:
+                continue
             line_num = text[:m.start()].count("\n") + 1
             blockers.append({
                 "type": "Hard Blocker: Vocabulaire IA Tier 1A",
@@ -309,11 +359,13 @@ def run_node_detector(file_path: Path, context_mode: str = "technical") -> Dict[
 def check_style(
     text: str,
     language: str = "auto",
-    context_mode: str = "technical"
+    context_mode: str = "technical",
+    allowed_terms: Optional[Union[List[str], set]] = None
 ) -> StyleCheckResult:
     """
     Point d'entrée principal du Style Guard.
     Évalue le document, applique la classification stricte des alertes et le budget gradué.
+    Supporte les exemptions explicites arbitrées par l'auteur (allowed_terms ou DOC_VERSION_ALLOWED_TERMS).
     """
     if not text or not text.strip():
         return StyleCheckResult(
@@ -324,6 +376,31 @@ def check_style(
             soft_warnings=[],
             detected_language="en"
         )
+
+    # Détection de désactivation explicite via variable d'environnement
+    if os.environ.get("DOC_VERSION_DISABLE_STYLE_GUARD") in ("1", "true", "True"):
+        w_cnt = len(re.findall(r"\b\w+\b", text))
+        return StyleCheckResult(
+            verdict="PASS",
+            word_count=w_cnt,
+            budget_max=2,
+            hard_blockers=[],
+            soft_warnings=[],
+            detected_language="en"
+        )
+
+    # Résolution des termes autorisés / arbitrés par l'utilisateur
+    allowed_set = set()
+    if allowed_terms:
+        for t in allowed_terms:
+            if isinstance(t, str) and t.strip():
+                allowed_set.add(t.strip().lower())
+    env_allowed = os.environ.get("DOC_VERSION_ALLOWED_TERMS", "") or os.environ.get("DOC_VERSION_ALLOW_TERMS", "")
+    if env_allowed:
+        for t in env_allowed.split(","):
+            if t.strip():
+                allowed_set.add(t.strip().lower())
+
 
     # Résolution de la langue
     detected_lang = detect_language(text)
@@ -342,13 +419,24 @@ def check_style(
     else:
         budget_max = 2
 
+    # Masquage de la section bibliographique pour éviter les faux positifs sur les titres et actes tiers
+    def mask_bib_section(m):
+        return m.group(1) + "\n" * m.group(2).count("\n")
+
+    text_for_audit = re.sub(
+        r"(^#{1,3}\s+(?:📚\s*)?(?:References|Références|Bibliographie|Bibliography)\b.*?\n)(.*)",
+        mask_bib_section,
+        text,
+        flags=re.DOTALL | re.IGNORECASE | re.MULTILINE
+    )
+
     # 1. Exécution du scan déterministe local
-    hard_blockers = scan_deterministic_hard_blockers(text, language=effective_lang)
+    hard_blockers = scan_deterministic_hard_blockers(text_for_audit, language=effective_lang, allowed_terms=allowed_set)
     soft_warnings = []
 
     # 2. Exécution du moteur detect.js
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tmp:
-        tmp.write(text)
+        tmp.write(text_for_audit)
         tmp_path = Path(tmp.name)
 
     try:
@@ -366,6 +454,10 @@ def check_style(
         iss_text = str(iss.get("text", "")).strip()
         iss_sug = str(iss.get("suggestion", "")).strip()
         line_num = locate_line_in_text(text, iss_text)
+
+        # Si le terme détecté fait partie des termes autorisés par l'utilisateur
+        if allowed_set and (iss_text.lower() in allowed_set or any(re.search(rf"\b{re.escape(a)}\b", iss_text, re.I) for a in allowed_set)):
+            continue
 
         # Classification Hard Blockers (Tolérance 0)
         if iss_type in ("tier1", "em-dash", "transition", "generic-conclusion",
@@ -455,3 +547,251 @@ def check_style(
         error_report=error_report,
         detected_language=effective_lang
     )
+
+
+def format_style_audit_summary(audit_data: Any) -> str:
+    """
+    Formate le libellé synthétique d'audit de style pour le tableau des commits :
+    Ex:
+    - '2 itérations (T1: 3 pb ➔ T2: 0 pb - PASS)'
+    - '1 tour (0 pb - Conforme)'
+    - 'N/A (commit Overleaf)'
+    """
+    if not audit_data:
+        return "N/A"
+
+    if isinstance(audit_data, str):
+        return audit_data.strip()
+
+    if isinstance(audit_data, dict):
+        if audit_data.get("summary"):
+            return str(audit_data["summary"]).strip()
+        if audit_data.get("is_overleaf"):
+            return "N/A (commit Overleaf)"
+
+        iterations = audit_data.get("iterations", [])
+        if not iterations:
+            final_v = audit_data.get("final_verdict") or audit_data.get("verdict")
+            if final_v == "PASS":
+                return "1 tour (0 pb - Conforme)"
+            return "N/A"
+
+        k = len(iterations)
+        if k == 1:
+            it0 = iterations[0]
+            total = it0.get("total_issues", 0)
+            verdict = it0.get("verdict", "PASS")
+            if total == 0 or verdict == "PASS":
+                return "1 tour (0 pb - Conforme)"
+            else:
+                tb = it0.get("tier_breakdown", {})
+                if tb:
+                    tb_items = [f"{k}: {v}" for k, v in tb.items()]
+                    return f"1 tour ({total} pb ({', '.join(tb_items)}) - {verdict})"
+                return f"1 tour ({total} pb - {verdict})"
+        else:
+            steps = []
+            for it in iterations:
+                it_num = it.get("iteration", len(steps) + 1)
+                total = it.get("total_issues", 0)
+                verdict = it.get("verdict", "")
+                if total == 0 or verdict == "PASS":
+                    steps.append(f"T{it_num}: 0 pb - PASS")
+                else:
+                    tb = it.get("tier_breakdown", {})
+                    if tb:
+                        tb_items = [f"{k}: {v}" for k, v in tb.items()]
+                        steps.append(f"T{it_num}: {total} pb ({', '.join(tb_items)})")
+                    else:
+                        steps.append(f"T{it_num}: {total} pb")
+            return f"{k} itérations (" + " ➔ ".join(steps) + ")"
+
+    return "N/A"
+
+
+def save_style_audit(
+    commit_id: str,
+    audit_data: Dict[str, Any],
+    target: Optional[str] = None,
+    storage_dir: Optional[Path] = None
+) -> None:
+    """
+    Sauvegarde l'audit de style pour un commit_id de manière persistante.
+    1. Dans storage_dir / style_audit.json (ou CAS par défaut).
+    2. Dans .doc_version / style_audit.json du projet si le dossier .doc_version existe.
+    3. Met à jour le commit json dans commits/<commit_id>.json s'il existe.
+    """
+    if not commit_id:
+        raise ValueError("commit_id ne peut pas être vide pour enregistrer l'audit de style.")
+
+    # 1. Résolution du storage_dir
+    cas_dir = None
+    if storage_dir is not None:
+        cas_dir = Path(storage_dir)
+    else:
+        env_dir = os.environ.get("DOC_VERSION_COMMITS_DIR")
+        if env_dir:
+            cas_dir = Path(env_dir)
+        else:
+            default_cas = Path.home() / ".gemini" / "antigravity" / "cas_commits"
+            if default_cas.exists():
+                cas_dir = default_cas
+            else:
+                cas_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
+
+    if cas_dir:
+        cas_dir.mkdir(parents=True, exist_ok=True)
+        audit_file = cas_dir / "style_audit.json"
+        store: Dict[str, Any] = {"commits": {}}
+        if audit_file.exists():
+            try:
+                store = json.loads(audit_file.read_text(encoding="utf-8"))
+                if "commits" not in store:
+                    store["commits"] = {}
+            except Exception:
+                store = {"commits": {}}
+        store["commits"][commit_id] = audit_data
+        tmp_f = cas_dir / f"audit_{os.getpid()}_{datetime.now().timestamp()}.tmp"
+        tmp_f.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_f.replace(audit_file)
+
+        # Si le commit JSON existe dans commits/, mise à jour directe
+        commit_f = cas_dir / "commits" / f"{commit_id}.json"
+        if not commit_f.exists():
+            matches = list((cas_dir / "commits").glob(f"{commit_id}*.json"))
+            if len(matches) == 1:
+                commit_f = matches[0]
+        if commit_f.exists():
+            try:
+                c_data = json.loads(commit_f.read_text(encoding="utf-8"))
+                c_data["style_audit"] = audit_data
+                commit_f.write_text(json.dumps(c_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+    # 2. Persistance locale dans .doc_version si présent
+    if target:
+        tp = Path(target)
+        target_dir = tp.parent if (tp.is_file() or not tp.exists()) else tp
+        local_doc_ver = None
+        for cand in [target_dir / ".doc_version", target_dir.parent / ".doc_version"]:
+            if cand.exists():
+                local_doc_ver = cand
+                break
+        if local_doc_ver and local_doc_ver.exists():
+            loc_audit_f = local_doc_ver / "style_audit.json"
+            loc_store: Dict[str, Any] = {"commits": {}}
+            if loc_audit_f.exists():
+                try:
+                    loc_store = json.loads(loc_audit_f.read_text(encoding="utf-8"))
+                    if "commits" not in loc_store:
+                        loc_store["commits"] = {}
+                except Exception:
+                    loc_store = {"commits": {}}
+            loc_store["commits"][commit_id] = audit_data
+            tmp_loc = local_doc_ver / f"audit_{os.getpid()}_{datetime.now().timestamp()}.tmp"
+            tmp_loc.write_text(json.dumps(loc_store, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp_loc.replace(loc_audit_f)
+
+
+def load_style_audit(
+    commit_id: str,
+    target: Optional[str] = None,
+    storage_dir: Optional[Path] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Charge l'audit de style pour un commit_id (ou préfixe de commit).
+    """
+    if not commit_id:
+        return None
+
+    # 1. Vérifier local .doc_version si target
+    if target:
+        tp = Path(target)
+        target_dir = tp.parent if (tp.is_file() or not tp.exists()) else tp
+        for cand_dir in [target_dir / ".doc_version", target_dir.parent / ".doc_version"]:
+            if cand_dir.exists():
+                loc_audit_f = cand_dir / "style_audit.json"
+                if loc_audit_f.exists():
+                    try:
+                        data = json.loads(loc_audit_f.read_text(encoding="utf-8"))
+                        commits = data.get("commits", {})
+                        if commit_id in commits:
+                            return commits[commit_id]
+                        for cid, audit in commits.items():
+                            if cid.startswith(commit_id) or commit_id.startswith(cid):
+                                return audit
+                    except Exception:
+                        pass
+
+    # 2. Vérifier storage_dir
+    cas_dir = None
+    if storage_dir is not None:
+        cas_dir = Path(storage_dir)
+    else:
+        env_dir = os.environ.get("DOC_VERSION_COMMITS_DIR")
+        if env_dir:
+            cas_dir = Path(env_dir)
+        else:
+            default_cas = Path.home() / ".gemini" / "antigravity" / "cas_commits"
+            if default_cas.exists():
+                cas_dir = default_cas
+            else:
+                cas_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
+
+    if cas_dir:
+        audit_file = cas_dir / "style_audit.json"
+        if audit_file.exists():
+            try:
+                store = json.loads(audit_file.read_text(encoding="utf-8"))
+                commits = store.get("commits", {})
+                if commit_id in commits:
+                    return commits[commit_id]
+                for cid, audit in commits.items():
+                    if cid.startswith(commit_id) or commit_id.startswith(cid):
+                        return audit
+            except Exception:
+                pass
+
+        # Vérifier dans le commit JSON lui-même
+        commit_f = cas_dir / "commits" / f"{commit_id}.json"
+        if not commit_f.exists():
+            matches = list((cas_dir / "commits").glob(f"{commit_id}*.json"))
+            if len(matches) == 1:
+                commit_f = matches[0]
+        if commit_f.exists():
+            try:
+                c_data = json.loads(commit_f.read_text(encoding="utf-8"))
+                if c_data.get("style_audit"):
+                    return c_data["style_audit"]
+            except Exception:
+                pass
+
+    return None
+
+
+def check_is_overleaf_commit(
+    repo_root: Optional[Path],
+    commit_id: str,
+    upstream_id: Optional[str] = None
+) -> bool:
+    """Détecte si un commit provient du dépôt Overleaf distant."""
+    if not repo_root or not commit_id:
+        return False
+    try:
+        res_remote = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5
+        )
+        if res_remote.returncode != 0 or "overleaf.com" not in res_remote.stdout:
+            return False
+
+        target_ref = upstream_id if upstream_id else "origin/main"
+        res_anc = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", commit_id, target_ref],
+            capture_output=True, text=True, timeout=5
+        )
+        return res_anc.returncode == 0
+    except Exception:
+        return False
+

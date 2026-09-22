@@ -7,6 +7,7 @@ import sys
 import re
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Union
 
@@ -35,20 +36,33 @@ def commit_document(
     content: str = "",
     author: str = "agent",
     mode: str = "paper",
-    is_pinned: bool = False
+    is_pinned: bool = False,
+    style_audit: Optional[Union[Dict[str, Any], str]] = None
 ) -> str:
     """
     Crée un instantané horodaté d'un document dans le Content-Addressable Storage (CAS).
     Supporte les fichiers sur disque et les mémoires virtuelles (drafts sans fichier).
+    Enregistre optionnellement l'audit de style avoid-ai-writing (itérations, problèmes).
     """
     try:
+        parsed_audit = None
+        if style_audit:
+            if isinstance(style_audit, str):
+                try:
+                    parsed_audit = json.loads(style_audit)
+                except Exception:
+                    parsed_audit = {"summary": style_audit.strip()}
+            elif isinstance(style_audit, dict):
+                parsed_audit = style_audit
+
         commit_record = cas.create_snapshot(
             target=target,
             message=message,
             author=author,
             is_pinned=is_pinned,
             content=content if content else None,
-            mode=mode
+            mode=mode,
+            style_audit=parsed_audit
         )
         return json.dumps({
             "status": "success",
@@ -61,7 +75,55 @@ def commit_document(
             "byte_size": commit_record["byte_size"],
             "compressed_size": commit_record["compressed_size"],
             "is_pinned": commit_record["is_pinned"],
-            "mode": commit_record["mode"]
+            "mode": commit_record["mode"],
+            "style_audit": commit_record.get("style_audit")
+        }, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def record_style_audit(
+    commit_id: str,
+    target: str = "",
+    iterations: str = "",
+    summary: str = ""
+) -> str:
+    """
+    Enregistre les métadonnées d'audit de style de la boucle avoid-ai-writing pour un commit donné.
+    Supporte les itérations détaillées (JSON) et/ou un libellé synthétique.
+    """
+    try:
+        from .style_guard import save_style_audit, format_style_audit_summary
+
+        audit_data: Dict[str, Any] = {
+            "commit_id": commit_id,
+            "target": target,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+        if iterations and iterations.strip():
+            try:
+                parsed_iters = json.loads(iterations)
+                if isinstance(parsed_iters, list):
+                    audit_data["iterations"] = parsed_iters
+                    audit_data["iterations_count"] = len(parsed_iters)
+                elif isinstance(parsed_iters, dict):
+                    audit_data.update(parsed_iters)
+            except Exception as ex:
+                raise ValueError(f"Le paramètre 'iterations' n'est pas un JSON valide : {ex}")
+
+        if summary and summary.strip():
+            audit_data["summary"] = summary.strip()
+        else:
+            audit_data["summary"] = format_style_audit_summary(audit_data)
+
+        cas.save_style_audit(commit_id, audit_data, target=target)
+        return json.dumps({
+            "status": "success",
+            "commit_id": commit_id,
+            "summary": audit_data["summary"],
+            "audit_data": audit_data
         }, indent=2, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
@@ -185,7 +247,8 @@ def get_diff_artifact(
     mode: str = "paper",
     brain_dir: str = "",
     artifact_name: str = "",
-    language: str = "auto"
+    language: str = "auto",
+    allowed_terms: str = ""
 ) -> str:
     """
     Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.
@@ -393,7 +456,8 @@ def get_diff_artifact(
         soft_warnings = []
         style_verdict = "PASS"
         if new_text and new_text.strip():
-            style_res = check_style(new_text, language=language)
+            parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
+            style_res = check_style(new_text, language=language, allowed_terms=parsed_allowed)
             style_verdict = style_res.verdict
             if style_res.verdict == "FAIL":
                 raise ValueError(style_res.error_report)
@@ -414,6 +478,27 @@ def get_diff_artifact(
         if not recent_commits:
             recent_commits = cas.list_snapshots(limit=5)
 
+        # Si le commit le plus récent n'a pas d'audit et que check_style a réussi sur le contenu :
+        if recent_commits and style_verdict != "FAIL" and 'style_res' in locals():
+            latest_id = recent_commits[0].get("commit_id", "")
+            from .style_guard import load_style_audit, save_style_audit
+            if latest_id and not load_style_audit(latest_id, target=target):
+                latest_author = str(recent_commits[0].get("author", "")).lower()
+                is_agent = latest_author in ("agent", "henri", "henri jamet")
+                if is_agent:
+                    audit_entry = {
+                        "commit_id": latest_id,
+                        "target": target,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "iterations_count": 1,
+                        "passed": True,
+                        "final_verdict": style_verdict,
+                        "iterations": [style_res.to_iteration_dict(1)],
+                        "summary": "1 tour (0 pb - Conforme)" if style_verdict == "PASS" else f"1 tour ({len(soft_warnings)} avert. - {style_verdict})"
+                    }
+                    save_style_audit(latest_id, audit_entry, target=target, storage_dir=cas.storage_dir)
+                    recent_commits[0]["style_audit"] = audit_entry
+
         artifact_content = ArtifactBuilder.assemble_brain_artifact(
             target_name=target_name,
             annotated_body=annotated_body,
@@ -425,7 +510,9 @@ def get_diff_artifact(
             recent_commits=recent_commits,
             final_content=new_text,
             mode=mode,
-            soft_warnings=soft_warnings
+            soft_warnings=soft_warnings,
+            repo_root=repo_root,
+            upstream_id=get_git_upstream_commit(repo_root) if repo_root else None
         )
 
         # Sauvegarde dans brain_dir si fourni & formatage des images

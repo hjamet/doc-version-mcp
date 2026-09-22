@@ -237,3 +237,104 @@ def test_get_diff_artifact_blocking_fail_and_warn_integration(tmp_path, monkeypa
     assert "Recommandations Stylistiques Non-Bloquantes" not in art_clean
     assert "Score IA" not in art_clean
     assert "Conformité Anti-IA" not in art_clean
+
+
+def test_iteration_tracking_and_summary_formatting():
+    """Valide le formatage synthétique des itérations anti-IA et la conversion to_iteration_dict."""
+    from doc_version_mcp.style_guard import format_style_audit_summary, StyleCheckResult
+
+    # 1. Test 1 tour propre (0 pb)
+    audit_1 = {
+        "iterations": [
+            {"iteration": 1, "verdict": "PASS", "total_issues": 0, "hard_blockers": 0, "soft_warnings": 0}
+        ]
+    }
+    assert format_style_audit_summary(audit_1) == "1 tour (0 pb - Conforme)"
+
+    # 2. Test 2 itérations avec résolution
+    audit_2 = {
+        "iterations": [
+            {
+                "iteration": 1,
+                "verdict": "FAIL",
+                "total_issues": 3,
+                "hard_blockers": 1,
+                "soft_warnings": 2,
+                "tier_breakdown": {"Tier 1": 1, "Tier 2": 2}
+            },
+            {
+                "iteration": 2,
+                "verdict": "PASS",
+                "total_issues": 0,
+                "hard_blockers": 0,
+                "soft_warnings": 0,
+                "tier_breakdown": {}
+            }
+        ]
+    }
+    summary_2 = format_style_audit_summary(audit_2)
+    assert "2 itérations" in summary_2
+    assert "T1: 3 pb" in summary_2
+    assert "T2: 0 pb - PASS" in summary_2
+
+    # 3. Test commit Overleaf
+    audit_overleaf = {"is_overleaf": True}
+    assert format_style_audit_summary(audit_overleaf) == "N/A (commit Overleaf)"
+
+    # 4. Test to_iteration_dict depuis un StyleCheckResult
+    scr = StyleCheckResult(
+        verdict="FAIL",
+        word_count=100,
+        budget_max=0,
+        hard_blockers=[{"type": "Hard Blocker: em-dash", "line": 5, "term": "—", "suggestion": "Virgule"}],
+        soft_warnings=[{"type": "Soft Warning: tier2", "line": 8, "term": "utilize", "suggestion": "use"}]
+    )
+    it_dict = scr.to_iteration_dict(iteration=1)
+    assert it_dict["iteration"] == 1
+    assert it_dict["verdict"] == "FAIL"
+    assert it_dict["total_issues"] == 2
+    assert it_dict["hard_blockers"] == 1
+    assert it_dict["soft_warnings"] == 1
+    assert "em-dash" in it_dict["tier_breakdown"]
+    assert "Tier 2" in it_dict["tier_breakdown"]
+
+
+def test_save_and_load_style_audit_persistence(tmp_path):
+    """Valide la sauvegarde atomique et le rechargement de style_audit.json."""
+    from doc_version_mcp.style_guard import save_style_audit, load_style_audit
+
+    cas_dir = tmp_path / "cas_test"
+    cas_dir.mkdir()
+
+    test_audit = {
+        "commit_id": "abcdef12",
+        "iterations_count": 2,
+        "summary": "2 itérations (T1: 1 pb ➔ T2: 0 pb - PASS)"
+    }
+
+    save_style_audit("abcdef12", test_audit, storage_dir=cas_dir)
+
+    loaded = load_style_audit("abcdef12", storage_dir=cas_dir)
+    assert loaded is not None
+    assert loaded["commit_id"] == "abcdef12"
+    assert loaded["summary"] == "2 itérations (T1: 1 pb ➔ T2: 0 pb - PASS)"
+
+    # Match par préfixe court
+    loaded_prefix = load_style_audit("abcdef", storage_dir=cas_dir)
+    assert loaded_prefix is not None
+    assert loaded_prefix["commit_id"] == "abcdef12"
+
+
+def test_allowed_terms_bypass():
+    """Valide que les termes whitelistés (ex: robust, comprehensive, leverage) ne bloquent pas le Style Guard."""
+    text_with_allowed = "We present a comprehensive evaluation to demonstrate that our model is more robust when we leverage prior knowledge."
+    # Sans allowed_terms -> FAIL
+    res_fail = check_style(text_with_allowed)
+    assert res_fail.verdict == "FAIL"
+
+    # Avec allowed_terms -> PASS
+    res_pass = check_style(text_with_allowed, allowed_terms=["comprehensive", "robust", "leverage"])
+    assert res_pass.verdict == "PASS"
+    assert len(res_pass.hard_blockers) == 0
+
+

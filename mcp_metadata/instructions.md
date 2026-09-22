@@ -21,11 +21,12 @@ Le serveur MCP `doc-version` gère le cycle de vie documentaire, le versionnage 
 
 ---
 
-## 🛠️ Suite des 6 Outils MCP
+## 🛠️ Suite des 7 Outils MCP
 
 | Outil | Rôle Principal | Paramètres Clés |
 |---|---|---|
-| `commit_document` | Fige un instantané horodaté dans le CAS | `target` (str), `message` (str), `author` ("agent" / "collaborateur"), `content` (opt), `is_pinned` (bool), `mode` ("paper" / "draft") |
+| `commit_document` | Fige un instantané horodaté dans le CAS | `target` (str), `message` (str), `author` ("agent" / "collaborateur"), `content` (opt), `is_pinned` (bool), `mode` ("paper" / "draft"), `style_audit` (opt) |
+| `record_style_audit` | Enregistre les métadonnées d'audit de style (itérations, résolutions) | `commit_id` (str), `target` (opt), `iterations` (opt), `summary` (opt) |
 | `get_diff_artifact` | Calcule le diff mot-à-mot et génère l'artéfact Markdown | `target` (str), `diff_explanation` (str), `brain_dir` (str), `mode` ("paper" / "draft"), `from_commit_id` (opt), `to_commit_id` (opt) |
 | `restore_commit` | Restaure l'état d'un fichier depuis un commit CAS | `commit_id` (str), `target` (opt), `dry_run` (bool, default False) |
 | `list_commits` | Liste l'historique chronologique des snapshots CAS | `target` (opt), `limit` (int, default 10), `mode` (opt) |

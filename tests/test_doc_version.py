@@ -312,9 +312,9 @@ def test_artifact_builder_recent_commits_and_no_ai_badges(temp_cas_dir, monkeypa
     assert "Justification Chirurgicale" not in content
     assert "Segment Original (Avant)" not in content
 
-    # Invariant 2 : Présence du tableau des 5 derniers commits CAS
+    # Invariant 2 : Présence du tableau des 5 derniers commits CAS avec colonne d'audit Anti-IA
     assert "### 🕒 Historique Récent (5 Derniers Commits)" in content
-    assert "| Commit ID | Date | Auteur | Message / Titre |" in content
+    assert "| Commit ID | Date | Auteur | Message / Titre | Boucle Anti-IA (Itérations & Résolutions) |" in content
     assert "Baseline v0 original" in content
     assert "Revision v1 surgical polish" in content
 
@@ -648,4 +648,94 @@ def test_git_upstream_baseline_when_ahead(tmp_path, monkeypatch):
     assert "Ajout commit 1." in res["artifact_content"]
     assert "Ajout commit 2 final." in res["artifact_content"]
     assert "Version Overleaf originale." in res["artifact_content"]
+
+
+def test_commit_with_style_audit_iterations_and_resolution(temp_cas_dir, monkeypatch):
+    """Valide l'enregistrement d'un audit multi-itérations et son affichage dans le tableau des commits."""
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    # 1. Créer un commit avec un audit à 2 itérations
+    audit_data = {
+        "iterations": [
+            {
+                "iteration": 1,
+                "verdict": "FAIL",
+                "total_issues": 3,
+                "hard_blockers": 1,
+                "soft_warnings": 2,
+                "tier_breakdown": {"Tier 1": 1, "Tier 2": 2}
+            },
+            {
+                "iteration": 2,
+                "verdict": "PASS",
+                "total_issues": 0,
+                "hard_blockers": 0,
+                "soft_warnings": 0,
+                "tier_breakdown": {}
+            }
+        ]
+    }
+
+    res_commit = json.loads(commit_document(
+        target="paper_review.tex",
+        message="Polissage suite boucle avoid-ai-writing",
+        content=r"\section{Introduction} Clean text without ai writing.",
+        author="agent",
+        mode="paper",
+        style_audit=audit_data
+    ))
+    assert res_commit["status"] == "success"
+    c_id = res_commit["commit_id"]
+
+    # 2. Générer le diff et vérifier la présence de la colonne et du résumé
+    res_diff = json.loads(get_diff_artifact(
+        target="paper_review.tex",
+        diff_explanation="Test affichage audit itérations",
+        from_commit_id=c_id
+    ))
+    assert res_diff["status"] == "success"
+    art = res_diff["artifact_content"]
+
+    # Invariants d'affichage
+    assert "| Boucle Anti-IA (Itérations & Résolutions) |" in art
+    assert "2 itérations (T1: 3 pb (Tier 1: 1, Tier 2: 2) ➔ T2: 0 pb - PASS)" in art
+
+
+def test_record_style_audit_tool_integration(temp_cas_dir, monkeypatch):
+    """Valide l'outil record_style_audit et la persistance rétroactive de l'audit."""
+    from doc_version_mcp.server import record_style_audit
+
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    # Créer un commit simple
+    res_c = json.loads(commit_document(
+        target="memo.md",
+        message="Snapshot avant audit",
+        content="# Memo",
+        author="agent"
+    ))
+    cid = res_c["commit_id"]
+
+    # Enregistrer un audit a posteriori
+    iters_json = json.dumps([
+        {"iteration": 1, "verdict": "FAIL", "total_issues": 1, "tier_breakdown": {"Tier 1": 1}},
+        {"iteration": 2, "verdict": "PASS", "total_issues": 0}
+    ])
+    res_record = json.loads(record_style_audit(
+        commit_id=cid,
+        target="memo.md",
+        iterations=iters_json
+    ))
+    assert res_record["status"] == "success"
+    assert "2 itérations" in res_record["summary"]
+    assert "T1: 1 pb" in res_record["summary"]
+    assert "T2: 0 pb - PASS" in res_record["summary"]
+
+    # Vérifier que get_commit et list_snapshots reflètent cet audit
+    c_loaded = test_cas.get_commit(cid)
+    assert "style_audit" in c_loaded
+    assert c_loaded["style_audit"]["summary"] == res_record["summary"]
+
 

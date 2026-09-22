@@ -90,19 +90,24 @@ class ArtifactBuilder:
     def build_recent_commits_table(
         cls,
         commits: Optional[List[Dict[str, Any]]] = None,
-        limit: int = 5
+        limit: int = 5,
+        target: Optional[str] = None,
+        repo_root: Optional[Path] = None,
+        upstream_id: Optional[str] = None
     ) -> str:
         """
         Génère le tableau Markdown canonique des N derniers commits CAS :
-        | Commit ID | Date | Auteur | Message / Titre |
+        | Commit ID | Date | Auteur | Message / Titre | Boucle Anti-IA (Itérations & Résolutions) |
         """
         if not commits:
             return ""
 
+        from .style_guard import format_style_audit_summary, load_style_audit, check_is_overleaf_commit
+
         rows = [
             "### 🕒 Historique Récent (5 Derniers Commits)\n",
-            "| Commit ID | Date | Auteur | Message / Titre |",
-            "| :--- | :--- | :--- | :--- |"
+            "| Commit ID | Date | Auteur | Message / Titre | Boucle Anti-IA (Itérations & Résolutions) |",
+            "| :--- | :--- | :--- | :--- | :--- |"
         ]
 
         for c in commits[:limit]:
@@ -119,7 +124,28 @@ class ArtifactBuilder:
 
             author = str(c.get("author", "agent")).replace("|", "\\|")
             msg = str(c.get("message", "")).replace("|", "\\|").strip()
-            rows.append(f"| {short_id} | {formatted_date} | {author} | {msg} |")
+
+            # 1. Résolution de l'audit de style
+            audit_data = c.get("style_audit")
+            if not audit_data and c_id:
+                audit_data = load_style_audit(c_id, target=target or c.get("target"))
+
+            # 2. Détection de commit Overleaf
+            is_overleaf = c.get("is_overleaf", False)
+            if not is_overleaf and repo_root and c_id:
+                is_overleaf = check_is_overleaf_commit(repo_root, c_id, upstream_id)
+
+            if is_overleaf:
+                summary = "N/A (commit Overleaf)"
+            elif audit_data:
+                summary = format_style_audit_summary(audit_data)
+            elif "overleaf" in msg.lower() or "overleaf" in author.lower():
+                summary = "N/A (commit Overleaf)"
+            else:
+                summary = "1 tour (0 pb - Conforme)" if str(c.get("author", "")).lower() in ("agent", "henri", "henri jamet") else "N/A"
+
+            summary_escaped = summary.replace("|", "\\|")
+            rows.append(f"| {short_id} | {formatted_date} | {author} | {msg} | {summary_escaped} |")
 
         return "\n".join(rows) + "\n\n---\n\n"
 
@@ -138,7 +164,9 @@ class ArtifactBuilder:
         enable_ai_score: bool = True,
         final_content: Optional[str] = None,
         mode: str = "paper",
-        soft_warnings: Optional[List[Dict[str, Any]]] = None
+        soft_warnings: Optional[List[Dict[str, Any]]] = None,
+        repo_root: Optional[Path] = None,
+        upstream_id: Optional[str] = None
     ) -> str:
         """Assemble l'artéfact complet destiné à Antigravity Brain."""
         header = cls.build_artifact_header(
@@ -176,7 +204,13 @@ class ArtifactBuilder:
             )
 
         # 3. Tableau des 5 derniers commits CAS
-        commits_block = cls.build_recent_commits_table(recent_commits, limit=5)
+        commits_block = cls.build_recent_commits_table(
+            recent_commits,
+            limit=5,
+            target=source_file,
+            repo_root=repo_root,
+            upstream_id=upstream_id
+        )
 
         # 4. Bloc dépliant de texte final prêt à copier (mode draft)
         copy_block = ""

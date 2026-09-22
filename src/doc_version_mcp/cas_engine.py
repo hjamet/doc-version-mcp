@@ -36,6 +36,7 @@ class CASEngine:
         self.objects_dir = self.storage_dir / "objects"
         self.commits_dir = self.storage_dir / "commits"
         self.index_file = self.storage_dir / "index.json"
+        self.style_audit_file = self.storage_dir / "style_audit.json"
 
         self.objects_dir.mkdir(parents=True, exist_ok=True)
         self.commits_dir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +108,8 @@ class CASEngine:
         content: Optional[str] = None,
         mode: str = "paper",
         commit_id: Optional[str] = None,
-        timestamp: Optional[str] = None
+        timestamp: Optional[str] = None,
+        style_audit: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Crée un instantané dans le CAS.
@@ -156,9 +158,15 @@ class CASEngine:
             "compressed_size": compressed_size,
             "parent_commit_id": parent_id
         }
+        if style_audit is not None:
+            commit_record["style_audit"] = style_audit
 
         commit_file = self.commits_dir / f"{actual_commit_id}.json"
         commit_file.write_text(json.dumps(commit_record, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # Sauvegarde persistante de l'audit de style si présent
+        if style_audit is not None:
+            self.save_style_audit(actual_commit_id, style_audit, target=norm_target)
 
         # Mise à jour de l'index
         targets_map[norm_target] = actual_commit_id
@@ -166,12 +174,27 @@ class CASEngine:
 
         return commit_record
 
+    def save_style_audit(self, commit_id: str, audit_data: Dict[str, Any], target: Optional[str] = None) -> None:
+        """Enregistre un audit de style dans le stockage CAS."""
+        from .style_guard import save_style_audit as sg_save_audit
+        sg_save_audit(commit_id, audit_data, target=target, storage_dir=self.storage_dir)
+
+    def load_style_audit(self, commit_id: str, target: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Charge un audit de style depuis le stockage CAS."""
+        from .style_guard import load_style_audit as sg_load_audit
+        return sg_load_audit(commit_id, target=target, storage_dir=self.storage_dir)
+
     def get_commit(self, commit_id: str) -> Dict[str, Any]:
         """Charge les métadonnées d'un commit."""
         c_path = self._find_commit_path(commit_id)
         if not c_path or not c_path.exists():
             raise FileNotFoundError(f"Commit introuvable : {commit_id}")
-        return json.loads(c_path.read_text(encoding="utf-8"))
+        data = json.loads(c_path.read_text(encoding="utf-8"))
+        if "style_audit" not in data:
+            audit = self.load_style_audit(commit_id, target=data.get("target"))
+            if audit:
+                data["style_audit"] = audit
+        return data
 
     def restore_snapshot(self, commit_id: str, target_file: Optional[str] = None) -> str:
         """
@@ -237,6 +260,11 @@ class CASEngine:
                     continue
                 if mode and (mode.lower() != c_mode):
                     continue
+
+                if "style_audit" not in data:
+                    audit = self.load_style_audit(data.get("commit_id", ""), target=data.get("target"))
+                    if audit:
+                        data["style_audit"] = audit
 
                 commits.append(data)
             except Exception:
