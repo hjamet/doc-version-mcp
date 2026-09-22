@@ -739,3 +739,87 @@ def test_record_style_audit_tool_integration(temp_cas_dir, monkeypatch):
     assert c_loaded["style_audit"]["summary"] == res_record["summary"]
 
 
+def test_sequential_drafts_diff_against_immediate_parent(temp_cas_dir, monkeypatch):
+    """
+    Valide que lors de révisions séquentielles (mode draft ou standard),
+    get_diff_artifact compare par défaut contre le commit parent immédiat (HEAD~1 CAS)
+    et non contre l'initiale baseline v0.
+    """
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    target_name = "virtual:draft_sequential_test"
+
+    # 1. Commit 0 : Baseline v0 initiale
+    c0 = json.loads(commit_document(
+        target=target_name,
+        message="Baseline v0 brouillon initial",
+        content="Salut l'équipe,\n\nJe voulais m'excuser pour le retard. Voici le premier jet avec plein de coquilles.",
+        author="henri",
+        mode="draft"
+    ))
+
+    # 2. Commit 1 : Tour 1 draft (polissage initial)
+    c1 = json.loads(commit_document(
+        target=target_name,
+        message="Tour 1 polissage initial",
+        content="Salut l'équipe,\n\nMerci pour votre patience. Voici le premier jet intermédiaire propre.",
+        author="agent",
+        mode="draft"
+    ))
+
+    # 3. Commit 2 : Tour 2 draft (ajustements demandés par Henri)
+    c2 = json.loads(commit_document(
+        target=target_name,
+        message="Tour 2 intégration retours Henri",
+        content="Salut l'équipe,\n\nMerci pour votre patience. Voici le premier jet final validé.",
+        author="henri",
+        mode="draft"
+    ))
+
+    # Cas A : Appel de get_diff_artifact sans from_commit_id sur le texte déjà commité (Commit 2)
+    # -> Doit comparer contre Commit 1 (parent direct), PAS contre Commit 0 (v0) !
+    res_a = json.loads(get_diff_artifact(
+        target=target_name,
+        content="Salut l'équipe,\n\nMerci pour votre patience. Voici le premier jet final validé.",
+        diff_explanation="Vérification parent immédiat Tour 2 vs Tour 1",
+        mode="draft"
+    ))
+    assert res_a["status"] == "success"
+    assert res_a["baseline_commit"] == c1["short_id"]
+    content_a = res_a["artifact_content"]
+    # Le texte intermédiaire issu de Commit 1 doit être le texte de référence (seul "intermédiaire" -> "final validé" change)
+    assert "intermédiaire" in content_a
+    assert "final validé" in content_a
+    # Les changements de Commit 0 ("m'excuser pour le retard" etc.) ne doivent PAS être dans le diff (ils sont résolus en Commit 1)
+    assert "m'excuser pour le retard" not in content_a
+
+    # Cas B : Appel avec from_commit_id="v0" explicite
+    # -> Doit comparer contre Commit 0 !
+    res_b = json.loads(get_diff_artifact(
+        target=target_name,
+        content="Salut l'équipe,\n\nMerci pour votre patience. Voici le premier jet final validé.",
+        from_commit_id="v0",
+        diff_explanation="Comparaison explicite contre v0",
+        mode="draft"
+    ))
+    assert res_b["status"] == "success"
+    assert res_b["baseline_commit"] == c0["short_id"]
+    content_b = res_b["artifact_content"]
+    assert "m\'excuser" in content_b or "m'excuser" in content_b
+    assert "retard" in content_b
+
+    # Cas C : Appel avec to_commit_id=Commit 1 sans from_commit_id
+    # -> Doit comparer Commit 1 contre son parent direct (Commit 0)
+    res_c = json.loads(get_diff_artifact(
+        target=target_name,
+        to_commit_id=c1["commit_id"],
+        diff_explanation="Comparaison to_commit parent automatique",
+        mode="draft"
+    ))
+    assert res_c["status"] == "success"
+    assert res_c["baseline_commit"] == c0["short_id"]
+    content_c = res_c["artifact_content"]
+    assert "retard" in content_c
+
+

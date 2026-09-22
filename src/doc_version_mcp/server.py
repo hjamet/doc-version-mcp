@@ -365,7 +365,7 @@ def get_diff_artifact(
                 if not cas_snaps or latest_git_ts >= latest_cas_ts:
                     use_git_baseline = True
 
-            current_raw = content if content else (disk_content if disk_content is not None else "")
+            current_raw = new_text if new_text else (content if content else (disk_content if disk_content is not None else ""))
 
             if use_git_baseline and repo_root and rel_git_path and git_commits:
                 head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
@@ -387,37 +387,42 @@ def get_diff_artifact(
                         parent_text = get_git_file_content(repo_root, rel_git_path, parent_rev)
                         if parent_text is not None:
                             old_text = parent_text
-                            baseline_commit_id = git_commits[1]["commit_id"] if len(git_commits) > 1 else "HEAD~1"
+                            baseline_commit_id = git_commits[1]["commit_id"][:8] if len(git_commits) > 1 else "HEAD~1"
                         else:
                             old_text = head_text
-                            baseline_commit_id = latest_git_id
+                            baseline_commit_id = latest_git_id[:8]
                     else:
                         old_text = head_text if head_text is not None else ""
-                        baseline_commit_id = latest_git_id
+                        baseline_commit_id = latest_git_id[:8]
             else:
-                if cas_snaps:
+                if to_commit_id:
+                    to_data = cas.get_commit(to_commit_id)
+                    parent_id = to_data.get("parent_commit_id")
+                    if parent_id and cas._find_commit_path(parent_id):
+                        old_text = cas.restore_snapshot(parent_id)
+                        baseline_commit_id = parent_id[:8]
+
+                if not old_text and cas_snaps:
                     candidate_id = cas_snaps[0]["commit_id"]
                     cand_text = cas.restore_snapshot(candidate_id)
 
-                    # Si le snapshot 0 est déjà identique au texte actuel, basculer sur le commit précédent ou baseline v0
+                    # Règle d'or Henri : Si le snapshot 0 est déjà identique au texte actuel (déjà commité),
+                    # comparer avec son commit parent direct (HEAD~1 dans le CAS) !
                     if cand_text and current_raw and current_raw.strip() == cand_text.strip() and len(cas_snaps) > 1:
-                        baseline_cand = next(
-                            (c for c in cas_snaps[1:] if "baseline" in str(c.get("message", "")).lower() or "v0" in str(c.get("message", "")).lower() or c.get("is_pinned")),
-                            None
-                        )
-                        if baseline_cand:
-                            old_text = cas.restore_snapshot(baseline_cand["commit_id"])
-                            baseline_commit_id = baseline_cand["commit_id"]
+                        parent_id = cas_snaps[0].get("parent_commit_id")
+                        if parent_id and cas._find_commit_path(parent_id):
+                            old_text = cas.restore_snapshot(parent_id)
+                            baseline_commit_id = parent_id[:8]
                         else:
                             old_text = cas.restore_snapshot(cas_snaps[1]["commit_id"])
-                            baseline_commit_id = cas_snaps[1]["commit_id"]
+                            baseline_commit_id = cas_snaps[1]["commit_id"][:8]
                     else:
                         old_text = cand_text
-                        baseline_commit_id = candidate_id
-                elif git_commits and repo_root and rel_git_path:
+                        baseline_commit_id = candidate_id[:8]
+                elif not old_text and git_commits and repo_root and rel_git_path:
                     head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
                     old_text = head_text if head_text is not None else ""
-                    baseline_commit_id = git_commits[0]["commit_id"]
+                    baseline_commit_id = git_commits[0]["commit_id"][:8]
 
         # Si pas d'ancienne version, considérer baseline vide ou identique
         if not old_text:
