@@ -23,6 +23,10 @@
         "default": "paper",
         "type": "string"
       },
+      "style_audit": {
+        "description": "Métadonnées d'audit de style avoid-ai-writing (itérations détaillées ou résumé synthétique)",
+        "type": "string"
+      },
       "target": {
         "type": "string"
       }

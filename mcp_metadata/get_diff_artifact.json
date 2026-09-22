@@ -4,6 +4,11 @@
   "parameters": {
     "additionalProperties": false,
     "properties": {
+      "allowed_terms": {
+        "default": "",
+        "description": "Termes autorisés séparés par des virgules pour contourner les faux-positifs du style guard",
+        "type": "string"
+      },
       "artifact_name": {
         "default": "",
         "type": "string"
