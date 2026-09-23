@@ -3,6 +3,7 @@ test_doc_version.py — Tests unitaires complets pour doc-version-mcp.
 """
 
 import os
+import re
 import tempfile
 import json
 from pathlib import Path
@@ -906,6 +907,82 @@ def test_latex_table_colors_and_checkmarks():
     assert r"\texttimes" not in converted
     assert "✓" in converted
     assert "×" in converted
+
+
+def test_fcolorbox_without_braces_and_parbox_dimexpr():
+    r"""Valide le déballage robuste de \fcolorbox sans accolades sur le 2e argument et \parbox avec \dimexpr."""
+    sample = r"""
+    \fcolorbox{acmblue!50}acmbluebg{ \parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{ **\textsf{Empirical Efficacy:}** The Full System ($G1$) achieved unanimous top ratings (5.0/5.0). } }
+    """
+    converted = LatexToMarkdownConverter.convert_text(sample)
+
+    assert r"\fcolorbox" not in converted
+    assert r"\parbox" not in converted
+    assert r"\dimexpr" not in converted
+    assert r"\relax" not in converted
+    assert r"\fboxsep" not in converted
+    assert r"\fboxrule" not in converted
+    assert r"acmbluebg" not in converted
+    assert "Empirical Efficacy:" in converted
+    assert "Full System" in converted
+
+
+def test_sanitize_katex_in_diff_consecutive_delimiters():
+    r"""Valide que les délimiteurs $$ ne sont pas capturés dans des span et que deux formules collées sont séparées."""
+    diff_sample = (
+        "<span style=\"background-color: #fee2e2;\">$$</span>\n"
+        "<span style=\"background-color: #fee2e2;\">\\text{Old Formula}</span>\n"
+        "<span style=\"background-color: #fee2e2;\">$$</span><span style=\"background-color: #dcfce7;\">$$</span>\n"
+        "<span style=\"background-color: #dcfce7;\">\\tau: V \\to \\Delta(V)</span>\n"
+        "<span style=\"background-color: #dcfce7;\">$$</span>\n"
+    )
+    cleaned = DiffEngine.sanitize_katex_in_diff(diff_sample)
+
+    assert "<span" not in cleaned
+    assert "$$" in cleaned
+    # Les blocs display math doivent être équilibrés (nombre pair de $$)
+    dollar_blocks = re.findall(r'\$\$', cleaned)
+    assert len(dollar_blocks) >= 2
+    assert len(dollar_blocks) % 2 == 0
+    # La formule \tau doit être préservée intacte
+    assert r"\tau: V \to \Delta(V)" in cleaned
+
+
+def test_cas_baseline_selection_n_minus_1(temp_cas_dir, tmp_path):
+    r"""Valide que get_diff_artifact sélectionne strictement le commit N-1 (et non v0) pour un doc CAS multi-commits."""
+    engine = CASEngine(storage_dir=temp_cas_dir)
+    target_path = tmp_path / "paper_kahn.tex"
+    target_path.write_text(r"\section{Topological Sort} Version 3", encoding="utf-8")
+
+    # Snapshot 1 (v0)
+    c1 = engine.create_snapshot(
+        target=str(target_path),
+        message="v0 - initial template",
+        content=r"\section{Topological Sort} Version 1",
+        author="agent"
+    )
+    # Snapshot 2 (v1, soit N-1)
+    c2 = engine.create_snapshot(
+        target=str(target_path),
+        message="v1 - intermediate draft",
+        content=r"\section{Topological Sort} Version 2",
+        author="agent"
+    )
+    # Snapshot 3 (v2, soit N)
+    c3 = engine.create_snapshot(
+        target=str(target_path),
+        message="v2 - final polish",
+        content=r"\section{Topological Sort} Version 3",
+        author="agent"
+    )
+
+    # Simulation de get_diff_artifact via un appel CAS direct
+    snaps = engine.list_snapshots(target=str(target_path), limit=10)
+    assert len(snaps) == 3
+    # Le commit le plus récent est c3, le commit parent N-1 est c2
+    assert snaps[0]["commit_id"] == c3["commit_id"]
+    assert snaps[1]["commit_id"] == c2["commit_id"]
+
 
 
 

@@ -445,14 +445,40 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\langle([a-zA-Z][a-zA-Z0-9_\\-]*?)\\rangle', repl_fused_langle, text)
         return text
 
+    @classmethod
+    def mask_math(cls, text: str) -> Tuple[str, Dict[str, str]]:
+        """Masque de manière robuste et étanche tous les blocs KaTeX ($$...$$ et $...$)."""
+        math_map: Dict[str, str] = {}
+
+        def repl_display(m):
+            token = f"___MATH_BLOCK_D_{len(math_map)}___"
+            math_map[token] = m.group(0)
+            return token
+
+        def repl_inline(m):
+            token = f"___MATH_BLOCK_I_{len(math_map)}___"
+            math_map[token] = m.group(0)
+            return token
+
+        text = re.sub(r'\$\$.*?\$\$', repl_display, text, flags=re.DOTALL)
+        text = re.sub(r'(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)', repl_inline, text)
+        return text, math_map
+
+    @classmethod
+    def unmask_math(cls, text: str, math_map: Dict[str, str]) -> str:
+        """Restaure les blocs KaTeX masqués en garantissant l'intégrité des $$."""
+        for token, math_content in math_map.items():
+            text = text.replace(token, math_content)
+        return text
+
     def convert_math(self, text: str) -> str:
-        """Convertit les équations LaTeX vers KaTeX Markdown."""
+        """Convertit les équations LaTeX vers KaTeX Markdown avec doubles dollars équilibrés."""
         text = self.fix_xml_tex_tags(text)
 
         def replace_display_env(match):
             env_name = match.group(1)
             content = match.group(2).strip()
-            content = re.sub(r'\\label\{[^}]+\}', '', content)
+            content = re.sub(r'\\label\{[^}]+\}', '', content).strip()
             if 'align' in env_name:
                 return f"\n\n$$\n\\begin{{aligned}}\n{content}\n\\end{{aligned}}\n$$\n\n"
             return f"\n\n$$\n{content}\n$$\n\n"
@@ -463,8 +489,16 @@ class LatexToMarkdownConverter:
             text,
             flags=re.DOTALL
         )
-        text = re.sub(r'\\\[(.*?)\\\]', r'\n\n$$\n\1\n$$\n\n', text, flags=re.DOTALL)
+        text = re.sub(r'\\\[(.*?)\\\]', lambda m: f"\n\n$$\n{re.sub(r'\\\\label\\{[^}]+\\}', '', m.group(1)).strip()}\n$$\n\n", text, flags=re.DOTALL)
         text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+
+        # Normalisation des blocs $$ déjà existants pour garantir doubles dollars sur leurs propres lignes
+        def normalize_dollar_blocks(m):
+            c = m.group(1).strip()
+            c = re.sub(r'\\label\{[^}]+\}', '', c).strip()
+            return f"\n\n$$\n{c}\n$$\n\n"
+
+        text = re.sub(r'\$\$(.*?)\$\$', normalize_dollar_blocks, text, flags=re.DOTALL)
         return text
 
     def convert_citations(self, text: str) -> str:
@@ -600,7 +634,7 @@ class LatexToMarkdownConverter:
         def parse_single_tabular(raw_tab: str, caption: str = "") -> str:
             clean = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|centering|small|footnotesize|scriptsize|label\{[^}]+\})', '', raw_tab)
             clean = re.sub(r'\\addlinespace(?:\s*\[[^\]]*\])?', '', clean)
-            clean = re.sub(r'\\(?:rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', clean)
+            clean = re.sub(r'\\(?:rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', clean)
             clean = re.sub(r'\\texttimes\b', '×', clean)
             clean = re.sub(r'\\checkmark\b', '✓', clean)
             clean = re.sub(r'\\ding\{51\}', '✓', clean)
@@ -750,133 +784,217 @@ class LatexToMarkdownConverter:
 
     @classmethod
     def unwrap_boxes(cls, text: str) -> str:
-        """Déballe récursivement les boîtes de mise en page LaTeX : \\fcolorbox, \\colorbox, \\parbox, \\raisebox, \\makebox, \\framebox."""
-        # 1. \fcolorbox{frame}{bg}{content} -> content
-        pattern_fcolorbox = re.compile(r'\\fcolorbox\s*(?:\[[^\]]*\])?\s*\{')
-        while True:
-            m = pattern_fcolorbox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            # arg 1 : frame
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            # arg 2 : bg
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            # arg 3 : body
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+        """
+        Déballe récursivement les boîtes de mise en page LaTeX :
+        \\fcolorbox, \\colorbox, \\parbox, \\raisebox, \\makebox, \\framebox, \\scalebox, \\resizebox.
+        Supporte les arguments avec ou sans accolades pour les couleurs et les dimensions.
+        """
+        def extract_arg(s: str, start: int) -> Tuple[Optional[str], int]:
+            """Extrait un argument : soit {groupe}, soit un mot simple sans accolades."""
+            m_space = re.match(r'\s*', s[start:])
+            curr = start + (m_space.end() if m_space else 0)
+            if curr >= len(s):
+                return None, curr
+            if s[curr] == '{':
+                val, next_i = LatexMacroEngine.extract_braced_group(s, curr)
+                return val, next_i
+            # Mot simple sans accolades (ex: acmbluebg ou white ou black)
+            m_word = re.match(r'([^\s{}%\\]+)', s[curr:])
+            if m_word:
+                return m_word.group(1), curr + m_word.end()
+            return None, curr
 
-        # 2. \colorbox{bg}{content} -> content
-        pattern_colorbox = re.compile(r'\\colorbox\s*(?:\[[^\]]*\])?\s*\{')
-        while True:
-            m = pattern_colorbox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            # arg 1 : bg
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            # arg 2 : body
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+        for _ in range(4):
+            prev_text = text
 
-        # 3. \parbox[pos][height][inner-pos]{width}{content} -> content
-        pattern_parbox = re.compile(r'\\parbox(?:\s*\[[^\]]*\])*\s*\{')
-        while True:
-            m = pattern_parbox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            # arg 1 : width
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            # arg 2 : body
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
-
-        # 4. \raisebox{lift}[height][depth]{content} -> content
-        pattern_raisebox = re.compile(r'\\raisebox\s*\{')
-        while True:
-            m = pattern_raisebox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            while idx < len(text) and text[idx] == '[':
-                close_bracket = text.find(']', idx)
-                if close_bracket == -1:
+            # 1. \fcolorbox[model]{frame}{bg}{content} -> content (avec ou sans accolades sur frame/bg)
+            pattern_fcolorbox = re.compile(r'\\fcolorbox(?:\s*\[[^\]]*\])?\s*')
+            pos = 0
+            while True:
+                m = pattern_fcolorbox.search(text, pos)
+                if not m:
                     break
-                idx = close_bracket + 1
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f" {body} " + text[end_idx:]
+                idx = m.end()
 
-        # 5. \makebox / \framebox
-        pattern_box = re.compile(r'\\(?:makebox|framebox)(?:\s*\[[^\]]*\])*\s*\{')
-        while True:
-            m = pattern_box.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f" {body} " + text[end_idx:]
+                # arg 1 : frame
+                arg1, idx = extract_arg(text, idx)
+                if arg1 is None:
+                    pos = m.end()
+                    continue
 
-        # 6. \scalebox / \resizebox
-        pattern_scalebox = re.compile(r'\\scalebox\s*\{')
-        while True:
-            m = pattern_scalebox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            while idx < len(text) and text[idx] == '[':
-                close_bracket = text.find(']', idx)
-                if close_bracket == -1:
+                # arg 2 : bg
+                arg2, idx = extract_arg(text, idx)
+                if arg2 is None:
+                    pos = m.end()
+                    continue
+
+                # arg 3 : body
+                m_space = re.match(r'\s*', text[idx:])
+                idx = idx + (m_space.end() if m_space else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+                pos = m.start()
+
+            # 2. \colorbox[model]{bg}{content} -> content (avec ou sans accolades sur bg)
+            pattern_colorbox = re.compile(r'\\colorbox(?:\s*\[[^\]]*\])?\s*')
+            pos = 0
+            while True:
+                m = pattern_colorbox.search(text, pos)
+                if not m:
                     break
-                idx = close_bracket + 1
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f" {body} " + text[end_idx:]
+                idx = m.end()
 
-        pattern_resizebox = re.compile(r'\\resizebox\*?\s*\{')
-        while True:
-            m = pattern_resizebox.search(text)
-            if not m:
-                break
-            idx = m.end() - 1
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
-            m_ws = re.match(r'\s*', text[idx:])
-            idx = idx + (m_ws.end() if m_ws else 0)
-            if idx >= len(text) or text[idx] != '{':
-                break
-            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-            text = text[:m.start()] + f" {body} " + text[end_idx:]
+                arg1, idx = extract_arg(text, idx)
+                if arg1 is None:
+                    pos = m.end()
+                    continue
 
+                m_space = re.match(r'\s*', text[idx:])
+                idx = idx + (m_space.end() if m_space else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+                pos = m.start()
+
+            # 3. \parbox[pos][height][inner-pos]{width}{content} -> content
+            pattern_parbox = re.compile(r'\\parbox(?:\s*\[[^\]]*\])*\s*')
+            pos = 0
+            while True:
+                m = pattern_parbox.search(text, pos)
+                if not m:
+                    break
+                idx = m.end()
+                m_space = re.match(r'\s*', text[idx:])
+                idx = idx + (m_space.end() if m_space else 0)
+                if idx >= len(text):
+                    pos = m.end()
+                    continue
+
+                # Consommation de l'argument width
+                if text[idx] == '{':
+                    _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+                elif text[idx:].startswith(r'\dimexpr'):
+                    m_dim = re.search(r'\\dimexpr.*?(?:\\relax|(?=\{))', text[idx:])
+                    if m_dim:
+                        idx = idx + m_dim.end()
+                    else:
+                        pos = m.end()
+                        continue
+                elif re.match(r'\\(?:linewidth|textwidth|columnwidth)[^\s{]*', text[idx:]):
+                    m_dim = re.match(r'\\(?:linewidth|textwidth|columnwidth)[^\s{]*', text[idx:])
+                    idx = idx + m_dim.end()
+                else:
+                    pos = m.end()
+                    continue
+
+                # Consommation du body {content}
+                m_space = re.match(r'\s*', text[idx:])
+                idx = idx + (m_space.end() if m_space else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+                pos = m.start()
+
+            # 4. \raisebox{lift}[height][depth]{content} -> content
+            pattern_raisebox = re.compile(r'\\raisebox\s*\{')
+            pos = 0
+            while True:
+                m = pattern_raisebox.search(text, pos)
+                if not m:
+                    break
+                idx = m.end() - 1
+                _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+                while idx < len(text) and text[idx] == '[':
+                    close_bracket = text.find(']', idx)
+                    if close_bracket == -1:
+                        break
+                    idx = close_bracket + 1
+                m_ws = re.match(r'\s*', text[idx:])
+                idx = idx + (m_ws.end() if m_ws else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f" {body} " + text[end_idx:]
+                pos = m.start()
+
+            # 5. \makebox / \framebox
+            pattern_box = re.compile(r'\\(?:makebox|framebox)(?:\s*\[[^\]]*\])*\s*\{')
+            pos = 0
+            while True:
+                m = pattern_box.search(text, pos)
+                if not m:
+                    break
+                idx = m.end() - 1
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f" {body} " + text[end_idx:]
+                pos = m.start()
+
+            # 6. \scalebox / \resizebox
+            pattern_scalebox = re.compile(r'\\scalebox\s*\{')
+            pos = 0
+            while True:
+                m = pattern_scalebox.search(text, pos)
+                if not m:
+                    break
+                idx = m.end() - 1
+                _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+                while idx < len(text) and text[idx] == '[':
+                    close_bracket = text.find(']', idx)
+                    if close_bracket == -1:
+                        break
+                    idx = close_bracket + 1
+                m_ws = re.match(r'\s*', text[idx:])
+                idx = idx + (m_ws.end() if m_ws else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f" {body} " + text[end_idx:]
+                pos = m.start()
+
+            pattern_resizebox = re.compile(r'\\resizebox\*?\s*\{')
+            pos = 0
+            while True:
+                m = pattern_resizebox.search(text, pos)
+                if not m:
+                    break
+                idx = m.end() - 1
+                _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+                m_ws = re.match(r'\s*', text[idx:])
+                idx = idx + (m_ws.end() if m_ws else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+                _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+                m_ws = re.match(r'\s*', text[idx:])
+                idx = idx + (m_ws.end() if m_ws else 0)
+                if idx >= len(text) or text[idx] != '{':
+                    pos = m.end()
+                    continue
+                body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+                text = text[:m.start()] + f" {body} " + text[end_idx:]
+                pos = m.start()
+
+            if text == prev_text:
+                break
+
+        # Élimination systématique des résidus internes de dimensions et règles
+        text = re.sub(r'\\dimexpr\b[^{}]*(?:\\relax)?', '', text)
+        text = re.sub(r'\\relax\b', '', text)
+        text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
+        text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
+        text = re.sub(r'\\vrule(?:\s*(?:width|height|depth)\s*[\d\.]+\s*[a-zA-Z%]+)*', '', text)
         return text
 
     def convert_environments(self, text: str) -> str:
@@ -942,7 +1060,8 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
         text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # 5. Configuration et métadonnées parasites
@@ -1029,6 +1148,11 @@ class LatexToMarkdownConverter:
         text = BibTexParser.decode_latex_accents(text)
         text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|small|footnotesize|scriptsize|large|Large|LARGE|huge|Huge)\b[ \t]*', ' ', text)
         text = re.sub(r'\\label\{[^}]+\}', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
+        text = re.sub(r'\\dimexpr\b[^{}]*(?:\\relax)?', '', text)
+        text = re.sub(r'\\relax\b', '', text)
+        text = re.sub(r'\\(?:fboxsep|fboxrule|linewidth|vrule)\b', '', text)
 
         text = re.sub(r'\\checkmark\b', '✓', text)
         text = re.sub(r'\\texttimes\b', '×', text)

@@ -196,7 +196,7 @@ class DiffEngine:
         text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
         text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # Configuration et métadonnées parasites
@@ -428,6 +428,37 @@ class DiffEngine:
         return cleaned_lines
 
     @classmethod
+    def sanitize_katex_in_diff(cls, text: str) -> str:
+        """
+        Garantit que les délimiteurs KaTeX $$...$$ sont parfaitement équilibrés,
+        isolés sur leurs propres lignes, et totalement exempts de balises HTML de diff
+        (<span>, <ins>, <del>) qui coupent les $$ ou cassent le parseur KaTeX.
+        """
+        if not text or "$$" not in text:
+            return text
+
+        # 1. Nettoyer les balises de diff parasites collées directement aux délimiteurs $$
+        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>\s*\$\$\s*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
+        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>\s*\$\$', '\n\n$$\n\n', text)
+        text = re.sub(r'\$\$\s*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
+
+        # 2. Supprimer les délimiteurs $$ consécutifs vides résultant de collages
+        text = re.sub(r'\$\$\s*\$\$', '', text)
+
+        # 3. Pour chaque bloc $$...$$, isoler les $$ sur leurs propres lignes et éliminer tout tag HTML intérieur
+        def clean_display_math(match):
+            inner = match.group(1)
+            clean_inner = re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', inner)
+            clean_inner = clean_inner.strip()
+            return f"\n\n$$\n{clean_inner}\n$$\n\n"
+
+        text = re.sub(r'\$\$(.*?)\$\$', clean_display_math, text, flags=re.DOTALL)
+
+        # 4. Nettoyer les sauts de ligne excessifs autour des blocs math
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text
+
+    @classmethod
     def wrap_inline_block(cls, text: str, tag: str = "span", style: str = "", extra_attrs: str = "") -> str:
         """Enrobe le texte dans <tag style="...">...</tag> en préservant les préfixes Markdown."""
         lines = text.splitlines(keepends=True)
@@ -548,14 +579,19 @@ class DiffEngine:
                 res_text = res_text.replace(tok, tbl)
             for tok, fig in new_figures.items():
                 res_text = res_text.replace(tok, fig)
+            res_text = cls.sanitize_katex_in_diff(res_text)
             return res_text.splitlines(), max(1, loc_add) if (loc_add > 0 or col_add == 0) else 0, 0, col_add, 0
 
         if not new_text.strip() or not cls.has_substantive_words(new_text):
             del_count = len([l for l in old_lines if cls.has_substantive_words(l)])
             if is_collab:
-                return [cls.format_del(old_text, is_collab=True, author=author_name)], 0, 0, 0, del_count
+                formatted_del = cls.format_del(old_text, is_collab=True, author=author_name)
+                formatted_del = cls.sanitize_katex_in_diff(formatted_del)
+                return formatted_del.splitlines(), 0, 0, 0, del_count
             else:
-                return [cls.format_del(old_text, is_collab=False, author="agent")], 0, del_count, 0, 0
+                formatted_del = cls.format_del(old_text, is_collab=False, author="agent")
+                formatted_del = cls.sanitize_katex_in_diff(formatted_del)
+                return formatted_del.splitlines(), 0, del_count, 0, 0
 
         # Isolation des tables et figures
         old_masked, old_tables = cls.mask_tables_in_text(old_text)
@@ -626,6 +662,7 @@ class DiffEngine:
         for f_tok, f_str in new_figures.items():
             diff_text = diff_text.replace(f_tok, f_str)
 
+        diff_text = cls.sanitize_katex_in_diff(diff_text)
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
         return clean_lines, local_add, local_del, collab_add, collab_del
@@ -739,6 +776,7 @@ class DiffEngine:
         tree_toc = "\n".join(tree_lines)
         annotated_body = "\n".join(annotated_document_lines)
         annotated_body = re.sub(r'\n{3,}', '\n\n', annotated_body).strip()
+        annotated_body = cls.sanitize_katex_in_diff(annotated_body)
 
         return annotated_body, tree_toc, total_diff_count, list(section_stats.keys())
 

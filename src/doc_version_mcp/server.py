@@ -275,7 +275,7 @@ def get_diff_artifact(
 
         # Détection Git
         is_git, repo_root, rel_git_path = (False, None, None)
-        if target_path:
+        if target_path and not str(target).startswith(("virtual:", "scratch:")):
             is_git, repo_root, rel_git_path = get_git_repo_info(target_path)
 
         # Contenu actuel sur le disque
@@ -320,23 +320,17 @@ def get_diff_artifact(
                 if not old_text:
                     raise FileNotFoundError(f"Commit baseline introuvable dans CAS et Git : {from_commit_id}")
         else:
-            # Pas de from_commit_id explicite : synchronisation automatique Git / CAS
             git_commits = get_git_commits(repo_root, rel_git_path, limit=10) if (is_git and repo_root and rel_git_path) else []
-            cas_snaps = cas.list_snapshots(target=target, limit=10)
-            if not cas_snaps and target_path:
-                cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=10)
 
-            # Synchroniser les commits Git récents dans le CAS s'ils sont absents
-            if git_commits and repo_root and rel_git_path:
-                for gc in git_commits:
-                    try:
-                        cas.get_commit(gc["commit_id"][:8])
-                    except (FileNotFoundError, ValueError):
+            # Synchronisation automatique des commits Git dans le CAS s'ils sont absents
+            if is_git and repo_root and rel_git_path and git_commits and not target.startswith(("virtual:", "scratch:")):
+                for gc in reversed(git_commits[:5]):
+                    if not cas._find_commit_path(gc["commit_id"][:8]):
                         c_text = get_git_file_content(repo_root, rel_git_path, gc["commit_id"])
                         if c_text is not None:
                             try:
                                 cas.create_snapshot(
-                                    target=str(target_path or target),
+                                    target=target,
                                     message=gc["message"],
                                     author=gc["author"],
                                     content=c_text,
@@ -348,81 +342,72 @@ def get_diff_artifact(
                             except Exception:
                                 pass
 
-            # Arbitrage entre Git et CAS avec parsing d'horodatage robuste
-            def parse_iso_ts(ts_str: str) -> float:
-                if not ts_str:
-                    return 0.0
-                try:
-                    return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-                except Exception:
-                    return 0.0
-
-            use_git_baseline = False
-            if git_commits and repo_root and rel_git_path:
-                latest_git = git_commits[0]
-                latest_git_ts = parse_iso_ts(latest_git.get("timestamp", ""))
-                latest_cas_ts = parse_iso_ts(cas_snaps[0].get("timestamp", "")) if cas_snaps else 0.0
-                if not cas_snaps or latest_git_ts >= latest_cas_ts:
-                    use_git_baseline = True
+            cas_snaps = cas.list_snapshots(target=target, limit=50)
+            if not cas_snaps and target_path:
+                cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=50)
 
             current_raw = new_text if new_text else (content if content else (disk_content if disk_content is not None else ""))
 
-            if use_git_baseline and repo_root and rel_git_path and git_commits:
-                head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
-                latest_git_id = git_commits[0]["commit_id"]
-
-                # Détection d'un upstream (ex: origin/main sur Overleaf) si la branche locale est en avance
-                upstream_id = get_git_upstream_commit(repo_root)
-                if upstream_id:
-                    upstream_text = get_git_file_content(repo_root, rel_git_path, upstream_id)
-                    if upstream_text is not None:
-                        old_text = upstream_text
-                        baseline_commit_id = upstream_id[:8]
-
-                if not old_text:
-                    # Règle d'or Henri : Si l'état actuel est déjà commité dans HEAD,
-                    # comparer avec HEAD~1 pour afficher les changements du commit !
-                    if head_text is not None and current_raw and current_raw.strip() == head_text.strip():
-                        parent_rev = "HEAD~1"
-                        parent_text = get_git_file_content(repo_root, rel_git_path, parent_rev)
-                        if parent_text is not None:
-                            old_text = parent_text
-                            baseline_commit_id = git_commits[1]["commit_id"][:8] if len(git_commits) > 1 else "HEAD~1"
-                        else:
-                            old_text = head_text
-                            baseline_commit_id = latest_git_id[:8]
-                    else:
-                        old_text = head_text if head_text is not None else ""
-                        baseline_commit_id = latest_git_id[:8]
-            else:
-                if to_commit_id:
+            # Priorité 1 : Historique fin Content-Addressable Storage (CAS)
+            if to_commit_id:
+                try:
                     to_data = cas.get_commit(to_commit_id)
                     parent_id = to_data.get("parent_commit_id")
                     if parent_id and cas._find_commit_path(parent_id):
                         old_text = cas.restore_snapshot(parent_id)
                         baseline_commit_id = parent_id[:8]
+                    else:
+                        # Recherche du commit immédiatement antérieur dans la liste
+                        c_idx = next((i for i, c in enumerate(cas_snaps) if c.get("commit_id", "").startswith(to_commit_id[:8])), -1)
+                        if c_idx >= 0 and c_idx + 1 < len(cas_snaps):
+                            prev_c = cas_snaps[c_idx + 1]
+                            old_text = cas.restore_snapshot(prev_c["commit_id"])
+                            baseline_commit_id = prev_c["commit_id"][:8]
+                except Exception:
+                    pass
 
-                if not old_text and cas_snaps:
-                    candidate_id = cas_snaps[0]["commit_id"]
-                    cand_text = cas.restore_snapshot(candidate_id)
+            if not old_text and cas_snaps:
+                latest_snap = cas_snaps[0]
+                latest_id = latest_snap["commit_id"]
+                cand_text = cas.restore_snapshot(latest_id)
 
-                    # Règle d'or Henri : Si le snapshot 0 est déjà identique au texte actuel (déjà commité),
-                    # comparer avec son commit parent direct (HEAD~1 dans le CAS) !
-                    if cand_text and current_raw and current_raw.strip() == cand_text.strip() and len(cas_snaps) > 1:
-                        parent_id = cas_snaps[0].get("parent_commit_id")
+                # Si le texte actuel correspond au snapshot le plus récent (commit N venant d'être scellé),
+                # la baseline DOIT être strictement le commit antérieur (N-1) !
+                if cand_text and current_raw and current_raw.strip() == cand_text.strip():
+                    if len(cas_snaps) > 1:
+                        parent_id = latest_snap.get("parent_commit_id")
                         if parent_id and cas._find_commit_path(parent_id):
                             old_text = cas.restore_snapshot(parent_id)
                             baseline_commit_id = parent_id[:8]
                         else:
-                            old_text = cas.restore_snapshot(cas_snaps[1]["commit_id"])
-                            baseline_commit_id = cas_snaps[1]["commit_id"][:8]
+                            prev_id = cas_snaps[1]["commit_id"]
+                            old_text = cas.restore_snapshot(prev_id)
+                            baseline_commit_id = prev_id[:8]
                     else:
+                        # Seul commit dans l'historique (v0)
                         old_text = cand_text
-                        baseline_commit_id = candidate_id[:8]
-                elif not old_text and git_commits and repo_root and rel_git_path:
-                    head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
+                        baseline_commit_id = latest_id[:8]
+                else:
+                    # Le texte actuel est en cours d'édition (N+1 non commité) :
+                    # La baseline est le dernier commit commité (N, soit cas_snaps[0])
+                    old_text = cand_text
+                    baseline_commit_id = latest_id[:8]
+
+            # Priorité 2 : Historique Git (si aucun snapshot CAS disponible)
+            elif not old_text and git_commits and repo_root and rel_git_path:
+                head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
+                latest_git_id = git_commits[0]["commit_id"]
+                if head_text is not None and current_raw and current_raw.strip() == head_text.strip() and len(git_commits) > 1:
+                    parent_text = get_git_file_content(repo_root, rel_git_path, "HEAD~1")
+                    if parent_text is not None:
+                        old_text = parent_text
+                        baseline_commit_id = git_commits[1]["commit_id"][:8]
+                    else:
+                        old_text = head_text
+                        baseline_commit_id = latest_git_id[:8]
+                else:
                     old_text = head_text if head_text is not None else ""
-                    baseline_commit_id = git_commits[0]["commit_id"][:8]
+                    baseline_commit_id = latest_git_id[:8]
 
         # Si pas d'ancienne version, considérer baseline vide ou identique
         if not old_text:

@@ -256,8 +256,18 @@ class CASEngine:
                 c_target = data.get("target", "").replace("\\", "/").lower()
                 c_mode = data.get("mode", "").lower()
 
-                if norm_target and (norm_target not in c_target and c_target not in norm_target and Path(norm_target).name != Path(c_target).name):
-                    continue
+                if norm_target:
+                    if "/" in norm_target:
+                        matches_path = (
+                            norm_target == c_target or
+                            norm_target in c_target or
+                            c_target in norm_target
+                        )
+                        if not matches_path:
+                            continue
+                    else:
+                        if Path(c_target).name.lower() != norm_target:
+                            continue
                 if mode and (mode.lower() != c_mode):
                     continue
 
