@@ -63,7 +63,16 @@ class DiffEngine:
                     sections.append(SectionBlock(curr_heading, curr_level, curr_title, curr_lines))
                 curr_heading = line
                 curr_level = len(match.group(1))
-                curr_title = match.group(2).strip()
+                raw_t = match.group(2).strip()
+                for _ in range(5):
+                    raw_t = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
+                    raw_t = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
+                    raw_t = re.sub(r'\\(?:textit|emph|textsl)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
+                    raw_t = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', raw_t)
+                raw_t = re.sub(r'\\label\{[^}]+\}', '', raw_t).strip()
+                raw_t = re.sub(r'^\*\*(.*?)\*\*$', r'\1', raw_t).strip()
+                raw_t = re.sub(r'\s+', ' ', raw_t).strip()
+                curr_title = raw_t
                 curr_lines = []
             else:
                 curr_lines.append(line)
@@ -110,19 +119,37 @@ class DiffEngine:
 
     @classmethod
     def clean_residual_latex(cls, text: str) -> str:
-        """Nettoie tout résidu LaTeX afin que les comparaisons portent sur le fond."""
+        """Nettoie tout résidu LaTeX afin que les comparaisons portent sur le fond avec protection KaTeX absolue."""
         if not text:
             return ""
-        # Environnements de mise en page (minipage, center, flushleft, flushright)
+
+        math_map = {}
+        def repl_display(m):
+            token = f"___DIFF_MATH_D_{len(math_map)}___"
+            math_map[token] = m.group(0)
+            return token
+
+        def repl_inline(m):
+            token = f"___DIFF_MATH_I_{len(math_map)}___"
+            math_map[token] = m.group(0)
+            return token
+
+        text = re.sub(r'\$\$.*?\$\$', repl_display, text, flags=re.DOTALL)
+        text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', repl_inline, text)
+
+        from .latex_resolver import LatexToMarkdownConverter
+        text = LatexToMarkdownConverter.unwrap_boxes(text)
+
+        # Environnements de mise en page (minipage, center, flushleft, flushright, tcolorbox)
         for _ in range(5):
             text = re.sub(
-                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\\begin\{(?:minipage|boxedminipage)\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{(?:minipage|boxedminipage)\}%?',
                 r'\n\n\1\n\n',
                 text,
                 flags=re.DOTALL
             )
-        for env in ('center', 'flushleft', 'flushright'):
-            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
+        for env in ('center', 'flushleft', 'flushright', 'tcolorbox', 'shaded', 'framed', 'mdframed'):
+            text = re.sub(rf'\\begin\{{{env}\}}(?:\[[^\]]*\])?\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
 
         # Blockquotes
         env_quote = re.compile(r'\\begin\{(?:quote|quotation|verse)\}\s*(.*?)\s*\\end\{(?:quote|quotation|verse)\}', re.DOTALL)
@@ -137,14 +164,20 @@ class DiffEngine:
         text = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', '', text)
         text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
 
-        for _ in range(3):
+        for _ in range(5):
             text = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'**\1**', text)
             text = re.sub(r'\\textit\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\emph\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', text)
+            text = re.sub(r'\\textsf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textsl\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\textsc\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textup\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textmd\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textrm\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textnormal\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
             text = re.sub(r'\\underline\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # Espacements et sauts
         text = re.sub(r'\\label\{[^}]+\}', '', text)
@@ -154,11 +187,16 @@ class DiffEngine:
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
         text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
 
-        # Règles et couleurs
+        # Règles, boîtes, couleurs et dimensions
         text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
         text = re.sub(r'\\rule(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\vrule\b(?:\s*(?:width|height|depth)\s*[\d\.]+\s*[a-zA-Z%]+)*', '', text)
+        text = re.sub(r'\\dimexpr\b[^{}]*(?:\\relax)?', '', text)
+        text = re.sub(r'\\relax\b', '', text)
+        text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
+        text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\color(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # Configuration et métadonnées parasites
@@ -167,6 +205,13 @@ class DiffEngine:
         text = re.sub(r'\\setlist(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
         text = re.sub(r'\\hypersetup\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
         text = re.sub(r'\\the(?:sub)*section\b', '', text)
+        text = re.sub(r'\\settopmatter\{[^}]*\}', '', text)
+        text = re.sub(r'\\(?:acmConference|acmBooktitle|acmYear|copyrightyear|acmDOI|acmISBN|acmPrice|acmSubmissionID)(?:\[[^\]]*\])?\{[^}]*\}', '', text)
+        text = re.sub(r'\\ccsdesc(?:\[[^\]]*\])?\{[^}]*\}', '', text)
+        text = re.sub(r'\\begin\{CCSXML\}.*?\\end\{CCSXML\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\Description\{((?:[^{}]|{[^{}]*})*)\}', '', text)
+        text = re.sub(r'\\affiliation\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\(?:institution|city|country|state|postcode|streetaddress)\{[^{}]*\}', '', text)
 
         # Caractères et symboles spéciaux
         text = re.sub(r'\\textbar\b', '|', text)
@@ -176,6 +221,10 @@ class DiffEngine:
         text = re.sub(r'\\textsubscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
         text = re.sub(r'\\rightarrow\b', '->', text)
         text = re.sub(r'\\leftarrow\b', '<-', text)
+        text = re.sub(r'\\checkmark\b', '✓', text)
+        text = re.sub(r'\\texttimes\b', '×', text)
+        text = re.sub(r'\\ding\{51\}', '✓', text)
+        text = re.sub(r'\\ding\{55\}', '✗', text)
         text = re.sub(r'\\\\(?:\[[^\]]*\])?', '\n', text)
 
         text = re.sub(r'\\(?:newcommand|renewcommand|providecommand)\*?\s*\{\\[a-zA-Z]+\}(?:\[\d+\])?\{.*?\}', '', text, flags=re.DOTALL)
@@ -190,9 +239,17 @@ class DiffEngine:
         text = re.sub(r'\\+\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\\+\s*\|', '|', text)
 
-        # Nettoyage des accolades résiduelles de groupement
+        # Nettoyage des accolades résiduelles de groupement AVANT de restaurer math_map
         for _ in range(3):
             text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
+
+        # Nettoyage des accolades fermantes orphelines
+        text = re.sub(r'\*\*\}([ \t]*)', '** ', text)
+        text = re.sub(r'\*\}\b', '* ', text)
+
+        # Restauration des blocs mathématiques KaTeX intacts
+        for token, math_content in math_map.items():
+            text = text.replace(token, math_content)
 
         text = re.sub(r'[ \t]{2,}', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)

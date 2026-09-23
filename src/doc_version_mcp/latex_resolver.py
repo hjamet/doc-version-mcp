@@ -43,6 +43,22 @@ class BibTexParser:
         text = text.replace(r'\OE', 'Œ').replace(r'{\OE}', 'Œ')
         text = text.replace(r'\ae', 'æ').replace(r'{\ae}', 'æ')
         text = text.replace(r'\AE', 'Æ').replace(r'{\AE}', 'Æ')
+
+        # Accents caron / háček (\v)
+        text = text.replace(r'{\v{c}}', 'č').replace(r'\'{c}', 'ć').replace(r'\v{c}', 'č').replace(r'\v c', 'č')
+        text = text.replace(r'{\v{C}}', 'Č').replace(r'\'{C}', 'Ć').replace(r'\v{C}', 'Č').replace(r'\v C', 'Č')
+        text = text.replace(r'{\v{s}}', 'š').replace(r'\v{s}', 'š').replace(r'\v s', 'š')
+        text = text.replace(r'{\v{S}}', 'Š').replace(r'\v{S}', 'Š').replace(r'\v S', 'Š')
+        text = text.replace(r'{\v{z}}', 'ž').replace(r'\v{z}', 'ž').replace(r'\v z', 'ž')
+        text = text.replace(r'{\v{Z}}', 'Ž').replace(r'\v{Z}', 'Ž').replace(r'\v Z', 'Ž')
+        text = text.replace(r'{\v{r}}', 'ř').replace(r'\v{r}', 'ř').replace(r'\v r', 'ř')
+        text = text.replace(r'{\v{e}}', 'ě').replace(r'\v{e}', 'ě').replace(r'\v e', 'ě')
+        text = text.replace(r'{\v{d}}', 'ď').replace(r'\v{d}', 'ď')
+        text = text.replace(r'{\v{t}}', 'ť').replace(r'\v{t}', 'ť')
+        text = text.replace(r'{\v{n}}', 'ň').replace(r'\v{n}', 'ň')
+        # Formes avec backslash direct comme \vsevic ou \vcek
+        text = re.sub(r'\\v\s*([cszredtnCSZREDTN])', r'\1', text)
+        text = re.sub(r'\\\'\s*([cszCSZ])', r'\1', text)
         text = re.sub(r'\\&', '&', text)
         return text
 
@@ -362,17 +378,47 @@ class LatexToMarkdownConverter:
                 if items:
                     self.keywords = ", ".join(items)
 
+        abstract_match = re.search(r'\\begin\{abstract\}(.*?)\\end\{abstract\}', text, re.DOTALL)
+        if abstract_match:
+            self.abstract = self.clean_inline_formatting(abstract_match.group(1).strip())
+
         doc_match = re.search(r'\\begin\{document\}(.*?)\\end\{document\}', text, re.DOTALL)
         body = doc_match.group(1) if doc_match else text
         body = re.sub(r'\\maketitle', '', body)
+        body = re.sub(r'\\(?:bibliographystyle|bibliography)(?:\{[^}]*\})?', '', body)
         return body
 
     def convert_headings(self, text: str) -> str:
-        """Convertit les titres LaTeX en titres Markdown."""
-        text = re.sub(r'\\section\*?\s*\{([^}]+)\}', r'\n\n## \1\n', text)
-        text = re.sub(r'\\subsection\*?\s*\{([^}]+)\}', r'\n\n### \1\n', text)
-        text = re.sub(r'\\subsubsection\*?\s*\{([^}]+)\}', r'\n\n#### \1\n', text)
-        text = re.sub(r'\\paragraph\*?\s*\{([^}]+)\}', r'\n\n##### \1\n', text)
+        """Convertit les titres LaTeX en titres Markdown avec gestion robuste des accolades imbriquées."""
+        heading_types = [
+            (r'\\section\*?', '##'),
+            (r'\\subsection\*?', '###'),
+            (r'\\subsubsection\*?', '####'),
+            (r'\\paragraph\*?', '#####'),
+            (r'\\subparagraph\*?', '######'),
+        ]
+        for cmd_pattern, md_prefix in heading_types:
+            pattern = re.compile(cmd_pattern + r'\s*\{')
+            while True:
+                m = pattern.search(text)
+                if not m:
+                    break
+                open_brace_idx = m.end() - 1
+                inner, end_idx = LatexMacroEngine.extract_braced_group(text, open_brace_idx)
+                # Nettoyer l'intérieur du titre pour qu'il soit propre
+                clean_title = inner.strip()
+                for _ in range(5):
+                    clean_title = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
+                    clean_title = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
+                    clean_title = re.sub(r'\\(?:textit|emph|textsl)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
+                    clean_title = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', clean_title)
+                clean_title = self.clean_layout_formatting(clean_title)
+                clean_title = self.clean_inline_formatting(clean_title).strip()
+                clean_title = re.sub(r'\\label\{[^}]+\}', '', clean_title).strip()
+                clean_title = re.sub(r'^\*\*(.*?)\*\*$', r'\1', clean_title).strip()
+                clean_title = re.sub(r'\s+', ' ', clean_title)
+                text = text[:m.start()] + f"\n\n{md_prefix} {clean_title}\n\n" + text[end_idx:]
+
         text = re.sub(r'\\label\{[^}]+\}', '', text)
         return text
 
@@ -554,6 +600,11 @@ class LatexToMarkdownConverter:
         def parse_single_tabular(raw_tab: str, caption: str = "") -> str:
             clean = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|centering|small|footnotesize|scriptsize|label\{[^}]+\})', '', raw_tab)
             clean = re.sub(r'\\addlinespace(?:\s*\[[^\]]*\])?', '', clean)
+            clean = re.sub(r'\\(?:rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', clean)
+            clean = re.sub(r'\\texttimes\b', '×', clean)
+            clean = re.sub(r'\\checkmark\b', '✓', clean)
+            clean = re.sub(r'\\ding\{51\}', '✓', clean)
+            clean = re.sub(r'\\ding\{55\}', '✗', clean)
             clean = self.replace_shortstack(clean)
             amp_marker = "___ESC_AMP___"
             clean = clean.replace(r'\&', amp_marker)
@@ -697,18 +748,151 @@ class LatexToMarkdownConverter:
             text = re.sub(r'\\begin\{(itemize|enumerate)\}(?:\s*\[[^\]]*\])?(.*?)\\end\{\1\}', parse_list, text, flags=re.DOTALL)
         return text
 
+    @classmethod
+    def unwrap_boxes(cls, text: str) -> str:
+        """Déballe récursivement les boîtes de mise en page LaTeX : \\fcolorbox, \\colorbox, \\parbox, \\raisebox, \\makebox, \\framebox."""
+        # 1. \fcolorbox{frame}{bg}{content} -> content
+        pattern_fcolorbox = re.compile(r'\\fcolorbox\s*(?:\[[^\]]*\])?\s*\{')
+        while True:
+            m = pattern_fcolorbox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            # arg 1 : frame
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            # arg 2 : bg
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            # arg 3 : body
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+
+        # 2. \colorbox{bg}{content} -> content
+        pattern_colorbox = re.compile(r'\\colorbox\s*(?:\[[^\]]*\])?\s*\{')
+        while True:
+            m = pattern_colorbox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            # arg 1 : bg
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            # arg 2 : body
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+
+        # 3. \parbox[pos][height][inner-pos]{width}{content} -> content
+        pattern_parbox = re.compile(r'\\parbox(?:\s*\[[^\]]*\])*\s*\{')
+        while True:
+            m = pattern_parbox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            # arg 1 : width
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            # arg 2 : body
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+
+        # 4. \raisebox{lift}[height][depth]{content} -> content
+        pattern_raisebox = re.compile(r'\\raisebox\s*\{')
+        while True:
+            m = pattern_raisebox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            while idx < len(text) and text[idx] == '[':
+                close_bracket = text.find(']', idx)
+                if close_bracket == -1:
+                    break
+                idx = close_bracket + 1
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f" {body} " + text[end_idx:]
+
+        # 5. \makebox / \framebox
+        pattern_box = re.compile(r'\\(?:makebox|framebox)(?:\s*\[[^\]]*\])*\s*\{')
+        while True:
+            m = pattern_box.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f" {body} " + text[end_idx:]
+
+        # 6. \scalebox / \resizebox
+        pattern_scalebox = re.compile(r'\\scalebox\s*\{')
+        while True:
+            m = pattern_scalebox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            while idx < len(text) and text[idx] == '[':
+                close_bracket = text.find(']', idx)
+                if close_bracket == -1:
+                    break
+                idx = close_bracket + 1
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f" {body} " + text[end_idx:]
+
+        pattern_resizebox = re.compile(r'\\resizebox\*?\s*\{')
+        while True:
+            m = pattern_resizebox.search(text)
+            if not m:
+                break
+            idx = m.end() - 1
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            _, idx = LatexMacroEngine.extract_braced_group(text, idx)
+            m_ws = re.match(r'\s*', text[idx:])
+            idx = idx + (m_ws.end() if m_ws else 0)
+            if idx >= len(text) or text[idx] != '{':
+                break
+            body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
+            text = text[:m.start()] + f" {body} " + text[end_idx:]
+
+        return text
+
     def convert_environments(self, text: str) -> str:
         """Convertit minipage, abstract, quote, tcolorbox, center, etc."""
+        text = self.unwrap_boxes(text)
+
         for _ in range(5):
             text = re.sub(
-                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\\begin\{(?:minipage|boxedminipage)\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{(?:minipage|boxedminipage)\}%?',
                 r'\n\n\1\n\n',
                 text,
                 flags=re.DOTALL
             )
 
-        for env in ('center', 'flushleft', 'flushright'):
-            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
+        for env in ('center', 'flushleft', 'flushright', 'tcolorbox', 'shaded', 'framed', 'mdframed'):
+            text = re.sub(rf'\\begin\{{{env}\}}(?:\[[^\]]*\])?\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
 
         env_names = r'(?:abstract|quote|quotation|verse)'
         def parse_quote(m):
@@ -721,16 +905,18 @@ class LatexToMarkdownConverter:
 
     def clean_layout_formatting(self, text: str) -> str:
         """Filtre et nettoie les commandes et balises de mise en page LaTeX brutes."""
+        text = self.unwrap_boxes(text)
+
         # 1. Environnements de mise en page (minipage, center, flushleft, flushright)
         for _ in range(5):
             text = re.sub(
-                r'\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{minipage\}%?',
+                r'\\begin\{(?:minipage|boxedminipage)\}(?:\[[^\]]*\])?(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})+\s*(.*?)\s*\\end\{(?:minipage|boxedminipage)\}%?',
                 r'\n\n\1\n\n',
                 text,
                 flags=re.DOTALL
             )
-        for env in ('center', 'flushleft', 'flushright'):
-            text = re.sub(rf'\\begin\{{{env}\}}\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
+        for env in ('center', 'flushleft', 'flushright', 'tcolorbox', 'shaded', 'framed', 'mdframed'):
+            text = re.sub(rf'\\begin\{{{env}\}}(?:\[[^\]]*\])?\s*(.*?)\s*\\end\{{{env}\}}', r'\n\n\1\n\n', text, flags=re.DOTALL)
 
         # 2. Polices et tailles de police
         text = re.sub(r'\\fontsize\{[^{}]*\}\{[^{}]*\}\s*(?:\\selectfont)?', '', text)
@@ -747,11 +933,16 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:setlength|addtolength)\{[^{}]*\}\{[^{}]*\}', '', text)
         text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
 
-        # 4. Règles et couleurs
+        # 4. Règles, boîtes, couleurs et dimensions
         text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
         text = re.sub(r'\\rule(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\vrule\b(?:\s*(?:width|height|depth)\s*[\d\.]+\s*[a-zA-Z%]+)*', '', text)
+        text = re.sub(r'\\dimexpr\b[^{}]*(?:\\relax)?', '', text)
+        text = re.sub(r'\\relax\b', '', text)
+        text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
+        text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\color(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # 5. Configuration et métadonnées parasites
@@ -760,6 +951,17 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\setlist(?:\[[^\]]*\])?\{[^{}]*\}', '', text)
         text = re.sub(r'\\hypersetup\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
         text = re.sub(r'\\the(?:sub)*section\b', '', text)
+        text = re.sub(r'\\settopmatter\{[^}]*\}', '', text)
+        text = re.sub(r'\\(?:acmConference|acmBooktitle|acmYear|copyrightyear|acmDOI|acmISBN|acmPrice|acmSubmissionID)(?:\[[^\]]*\])?\{[^}]*\}', '', text)
+        text = re.sub(r'\\ccsdesc(?:\[[^\]]*\])?\{[^}]*\}', '', text)
+        text = re.sub(r'\\begin\{CCSXML\}.*?\\end\{CCSXML\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\Description\{((?:[^{}]|{[^{}]*})*)\}', '', text)
+        text = re.sub(r'\\affiliation\{((?:[^{}]|{[^{}]*})*)\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\(?:institution|city|country|state|postcode|streetaddress)\{[^{}]*\}', '', text)
+
+        # Bibliographie résiduelle
+        text = re.sub(r'\\(?:bibliographystyle|bibliography)(?:\{[^}]*\})?', '', text)
+        text = re.sub(r'\\nocite\*?(?:\{[^}]*\})?', '', text)
 
         # 6. Caractères et symboles spéciaux
         text = re.sub(r'\\textbar\b', '|', text)
@@ -769,12 +971,16 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\textsubscript\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
         text = re.sub(r'\\rightarrow\b', '->', text)
         text = re.sub(r'\\leftarrow\b', '<-', text)
+        text = re.sub(r'\\checkmark\b', '✓', text)
+        text = re.sub(r'\\texttimes\b', '×', text)
+        text = re.sub(r'\\ding\{51\}', '✓', text)
+        text = re.sub(r'\\ding\{55\}', '✗', text)
         text = re.sub(r'\\\\(?:\[[^\]]*\])?', '\n', text)
 
         return text
 
     def clean_inline_formatting(self, text: str) -> str:
-        """Nettoie le formatage inline LaTeX."""
+        """Nettoie le formatage inline LaTeX avec protection KaTeX absolue."""
         text = re.sub(r'\\par\b', '\n\n', text)
         text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
         text = self.replace_shortstack(text)
@@ -793,12 +999,20 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\$\$.*?\$\$', repl_display, text, flags=re.DOTALL)
         text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', repl_inline, text)
 
-        for _ in range(3):
+        # Déballage des polices inline récursif
+        for _ in range(5):
             text = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'**\1**', text)
             text = re.sub(r'\\textit\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\emph\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', text)
+            text = re.sub(r'\\textsf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textsl\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
             text = re.sub(r'\\textsc\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textup\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textmd\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textrm\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\textnormal\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+            text = re.sub(r'\\underline\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
             text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         text = re.sub(r'\\eqref\{([^}]+)\}', r'(\1)', text)
@@ -816,12 +1030,22 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|small|footnotesize|scriptsize|large|Large|LARGE|huge|Huge)\b[ \t]*', ' ', text)
         text = re.sub(r'\\label\{[^}]+\}', '', text)
 
-        for token, math_content in math_map.items():
-            text = text.replace(token, math_content)
+        text = re.sub(r'\\checkmark\b', '✓', text)
+        text = re.sub(r'\\texttimes\b', '×', text)
+        text = re.sub(r'\\ding\{51\}', '✓', text)
+        text = re.sub(r'\\ding\{55\}', '✗', text)
 
-        # Nettoyage des accolades résiduelles de groupement
+        # Nettoyage des accolades résiduelles de groupement AVANT de restaurer math_map !
         for _ in range(3):
             text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
+
+        # Nettoyage des accolades fermantes orphelines
+        text = re.sub(r'\*\*\}([ \t]*)', '** ', text)
+        text = re.sub(r'\*\}\b', '* ', text)
+
+        # Restauration des blocs mathématiques KaTeX intacts
+        for token, math_content in math_map.items():
+            text = text.replace(token, math_content)
 
         return text
 

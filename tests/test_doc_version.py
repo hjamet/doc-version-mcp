@@ -823,3 +823,89 @@ def test_sequential_drafts_diff_against_immediate_parent(temp_cas_dir, monkeypat
     assert "retard" in content_c
 
 
+def test_latex_command_filtering_and_nested_braces():
+    """Valide le filtrage absolu des commandes LaTeX dans les headings et les corps de texte."""
+    latex_text = r"""
+    \section{Introduction}
+    \paragraph*{\textsf{\textbf{Limitations of Monolithic LLMs.}}}
+    Intelligent Tutoring Systems have long aimed to deliver personalized instruction.
+    \paragraph*{\textsf{\textbf{The DLLP Framework.}}}
+    To resolve these challenges, we introduce the framework.
+    """
+    converted = LatexToMarkdownConverter.convert_text(latex_text)
+
+    # 1. Pas de résidu \textsf ni **} orphelin
+    assert r"\textsf" not in converted
+    assert "**}" not in converted
+    assert "##### Limitations of Monolithic LLMs." in converted
+    assert "##### The DLLP Framework." in converted
+    assert "Intelligent Tutoring Systems" in converted
+
+
+def test_latex_boxes_unwrapping_and_layout():
+    r"""Valide le déballage complet des boîtes de mise en page \fcolorbox et \parbox."""
+    latex_text = r"""
+    \fcolorbox{acmblue!50}{acmbluebg}{
+      \parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{
+        \small\textbf{\textsf{\color{acmblue}Takeaway:}} Graph constraints replace unconstrained generation.
+      }
+    }
+    \parbox{\linewidth}{
+      {\color{acmblue}\vrule width 2.5pt}\hspace{6pt}
+      \parbox{\dimexpr\linewidth-10pt\relax}{
+        \small\textbf{\textsf{\color{acmblue}RQ1:}} How does dynamic compilation prevent cycles?
+      }
+    }
+    """
+    converted = LatexToMarkdownConverter.convert_text(latex_text)
+
+    # Vérification que toutes les commandes parasites sont éradiquées
+    assert r"\fcolorbox" not in converted
+    assert r"\parbox" not in converted
+    assert r"\vrule" not in converted
+    assert r"\dimexpr" not in converted
+    assert r"\relax" not in converted
+    assert r"\fboxsep" not in converted
+    assert r"\fboxrule" not in converted
+    assert r"\color" not in converted
+    assert "**Takeaway:** Graph constraints replace unconstrained generation." in converted
+    assert "**RQ1:** How does dynamic compilation prevent cycles?" in converted
+
+
+def test_katex_math_braces_preservation():
+    """Valide que les accolades KaTeX dans les exposants/indices sont préservées intactes."""
+    latex_text = r"""
+    \section{Formulation}
+    Given $\text{Top-}k(q) = \arg\max_{c \in \mathcal{C}}^{(k)} \cos(\mathbf{e}_q, \mathbf{e}_c)$
+    and visual elements $\mathcal{I}_p = \{d_{p,k}\}_{k=1}^{K_p}$.
+    """
+    converted = LatexToMarkdownConverter.convert_text(latex_text)
+
+    # Les accolades de mathématiques KaTeX ne doivent pas avoir été tronquées
+    assert "^{(k)}" in converted
+    assert "^{K_p}" in converted
+    assert "_{c \\in \\mathcal{C}}" in converted
+
+
+def test_latex_table_colors_and_checkmarks():
+    r"""Valide le nettoyage de \rowcolor, \checkmark et \texttimes dans les tableaux."""
+    latex_text = r"""
+    \begin{tabularx}{\textwidth}{l c c}
+    \toprule
+    System & DAG & Multi-Agent \\
+    \midrule
+    \rowcolor{acmbluebg}
+    DLLP & \checkmark & \texttimes \\
+    \bottomrule
+    \end{tabularx}
+    """
+    converted = LatexToMarkdownConverter.convert_text(latex_text)
+
+    assert r"\rowcolor" not in converted
+    assert r"\checkmark" not in converted
+    assert r"\texttimes" not in converted
+    assert "✓" in converted
+    assert "×" in converted
+
+
+
