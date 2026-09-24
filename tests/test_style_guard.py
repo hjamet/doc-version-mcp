@@ -207,7 +207,10 @@ def test_get_diff_artifact_blocking_fail_and_warn_integration(tmp_path, monkeypa
     assert res_warn["status"] == "success"
     assert res_warn["style_verdict"] == "WARN"
     assert res_warn["soft_warnings_count"] == 1
-    art_warn = res_warn["artifact_content"]
+    assert "artifact_content" not in res_warn
+    assert res_warn["saved_artifact_path"] is not None
+    assert Path(res_warn["saved_artifact_path"]).exists()
+    art_warn = Path(res_warn["saved_artifact_path"]).read_text(encoding="utf-8")
 
     # Vérification présence du tableau dépliant
     assert "<details><summary>💡 Recommandations Stylistiques Non-Bloquantes (1 alertes)</summary>" in art_warn
@@ -231,7 +234,11 @@ def test_get_diff_artifact_blocking_fail_and_warn_integration(tmp_path, monkeypa
     assert res_clean["status"] == "success"
     assert res_clean["style_verdict"] == "PASS"
     assert res_clean["soft_warnings_count"] == 0
-    art_clean = res_clean["artifact_content"]
+    assert "artifact_content" not in res_clean
+    assert res_clean["saved_artifact_path"] is not None
+    assert Path(res_clean["saved_artifact_path"]).exists()
+    art_clean = Path(res_clean["saved_artifact_path"]).read_text(encoding="utf-8")
+
 
     # Ni badge, ni tableau dépliant
     assert "Recommandations Stylistiques Non-Bloquantes" not in art_clean

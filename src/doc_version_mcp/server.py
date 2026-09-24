@@ -7,7 +7,9 @@ import sys
 import re
 import json
 import subprocess
+import tempfile
 from datetime import datetime, timezone
+
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Union
 
@@ -18,7 +20,8 @@ from .diff_engine import DiffEngine
 from .latex_resolver import LatexToMarkdownConverter, BibTexParser
 from .draft_engine import DraftEngine
 from .artifact_builder import ArtifactBuilder
-from .style_guard import check_style
+from .style_guard import check_style, run_preservation_validator
+
 
 # Instanciation du serveur FastMCP
 mcp = FastMCP(
@@ -248,8 +251,11 @@ def get_diff_artifact(
     brain_dir: str = "",
     artifact_name: str = "",
     language: str = "auto",
-    allowed_terms: str = ""
+    allowed_terms: str = "",
+    context_mode: str = "general",
+    return_content: bool = False
 ) -> str:
+
     """
     Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.
     Supporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).
@@ -447,12 +453,18 @@ def get_diff_artifact(
         style_verdict = "PASS"
         if new_text and new_text.strip():
             parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
-            style_res = check_style(new_text, language=language, allowed_terms=parsed_allowed)
+            style_res = check_style(new_text, language=language, context_mode=context_mode, allowed_terms=parsed_allowed)
             style_verdict = style_res.verdict
             if style_res.verdict == "FAIL":
                 raise ValueError(style_res.error_report)
             if style_res.verdict == "WARN":
                 soft_warnings = style_res.soft_warnings
+
+        # 4. Validation de préservation structurelle (validate.js)
+        preservation_result = None
+        if old_text and new_text and old_text.strip() != new_text.strip():
+            preservation_result = run_preservation_validator(old_text, new_text)
+
 
         annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
             old_text=old_text,
@@ -505,7 +517,7 @@ def get_diff_artifact(
             upstream_id=get_git_upstream_commit(repo_root) if repo_root else None
         )
 
-        # Sauvegarde dans brain_dir si fourni & formatage des images
+        # Sauvegarde sur disque : brain_dir si fourni, sinon répertoire temporaire dédié
         saved_path = None
         if brain_dir:
             b_dir = Path(brain_dir)
@@ -519,28 +531,94 @@ def get_diff_artifact(
             art_file.write_text(artifact_content, encoding="utf-8")
             saved_path = art_file.as_posix()
         else:
-            # Si pas de brain_dir, s'assurer que toute image wikilink est convertie en markdown standard
+            # Répertoire de repli pour garantir que l'artéfact est toujours sauvé sur disque
+            fallback_dir = Path(tempfile.gettempdir()) / "doc_version_artifacts"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+
             def repl_wikilink_clean(m):
                 raw = m.group(1).split('|')[0].strip()
                 alt = Path(raw).stem.replace('_', ' ')
                 return f"![{alt}]({Path(raw).name})"
             artifact_content = re.sub(r'!\[\[(.*?)\]\]', repl_wikilink_clean, artifact_content)
+            art_file = fallback_dir / f"{target_name}.md"
+            art_file.write_text(artifact_content, encoding="utf-8")
+            saved_path = art_file.as_posix()
+
+        # Collecte unifiée des problèmes pour la boucle de raffinage itérative
+        issues_list = []
+        for sw in soft_warnings:
+            issues_list.append({
+                "severity": "soft_warning",
+                "type": sw.get("type", "Soft Warning"),
+                "line": sw.get("line"),
+                "term": sw.get("term"),
+                "suggestion": sw.get("suggestion")
+            })
+
+        if 'style_res' in locals() and style_res.stylometric_warnings:
+            for st in style_res.stylometric_warnings:
+                issues_list.append({
+                    "severity": "stylometric_signal",
+                    "type": st.get("type", "Stylometric Signal"),
+                    "line": st.get("line"),
+                    "term": st.get("term"),
+                    "suggestion": st.get("suggestion")
+                })
+
+        if retention is not None and not is_compliant:
+            issues_list.append({
+                "severity": "retention_violation",
+                "type": "Retention Non-Compliance",
+                "line": None,
+                "term": f"{retention:.1f}%",
+                "suggestion": f"Augmenter la fidélité au texte d'origine d'Henri pour atteindre au moins 90.0% (actuellement {retention:.1f}%)."
+            })
+
+        if preservation_result and not preservation_result.get("ok", True):
+            for pe in preservation_result.get("errors", []):
+                issues_list.append({
+                    "severity": "preservation_error",
+                    "type": "Preservation Violation",
+                    "line": None,
+                    "term": pe,
+                    "suggestion": "Ne pas modifier les éléments protégés (code blocks, frontmatter, tableaux, URLs, structure de titres)."
+                })
 
         res_data = {
             "status": "success",
+            "saved_artifact_path": saved_path,
             "diff_count": diff_count,
             "modified_sections": mod_sections,
             "baseline_commit": baseline_commit_id[:8] if baseline_commit_id else None,
-            "saved_artifact_path": saved_path,
-            "artifact_content": artifact_content,
             "style_verdict": style_verdict,
-            "soft_warnings_count": len(soft_warnings)
+            "soft_warnings_count": len(soft_warnings),
+            "soft_warnings": soft_warnings,
+            "issues": issues_list,
+            "issues_count": len(issues_list)
         }
+
+        if 'style_res' in locals() and style_res.stylometric_warnings:
+            res_data["stylometric_warnings"] = style_res.stylometric_warnings
+            res_data["stylometric_warnings_count"] = len(style_res.stylometric_warnings)
+
         if retention is not None:
             res_data["retention_percent"] = retention
             res_data["is_retention_compliant"] = is_compliant
+            if not is_compliant:
+                res_data["retention_warning"] = f"Seuil de rétention non respecté ({retention:.1f}% < 90.0%). Le texte d'origine d'Henri a été trop altéré."
+
+        if preservation_result:
+            res_data["preservation_ok"] = preservation_result.get("ok", True)
+            if not preservation_result.get("ok", True):
+                res_data["preservation_errors"] = preservation_result.get("errors", [])
+            if preservation_result.get("warnings"):
+                res_data["preservation_warnings"] = preservation_result.get("warnings", [])
+
+        if return_content:
+            res_data["artifact_content"] = artifact_content
 
         return json.dumps(res_data, indent=2, ensure_ascii=False)
+
     except Exception as e:
         return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 

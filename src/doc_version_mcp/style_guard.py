@@ -17,9 +17,15 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 
 
 DEFAULT_DETECT_JS_PATHS = [
-    Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
     Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
+    Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
 ]
+
+DEFAULT_VALIDATE_JS_PATHS = [
+    Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\detector\validate.js"),
+    Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\detector\validate.js"),
+]
+
 
 # Stop-words pour la détection automatique de la langue
 FR_STOPWORDS = {
@@ -75,7 +81,7 @@ TIER1A_TERMS = {
     "best practices": "proven methods, standards"
 }
 
-# Transitions mécaniques anglaises (Hard Blockers - Tolérance 0)
+# Transitions mécaniques anglaises et adverbes creux (Hard Blockers - Tolérance 0)
 EN_MECHANICAL_TRANSITIONS = {
     "moreover": "cut or integrate smoothly",
     "furthermore": "cut or integrate smoothly",
@@ -83,10 +89,16 @@ EN_MECHANICAL_TRANSITIONS = {
     "notably": "cut or state concrete fact",
     "additionally": "also, and, or cut",
     "in summary": "cut or state conclusion",
-    "to summarize": "cut or state conclusion"
+    "to summarize": "cut or state conclusion",
+    "it is worth noting": "cut or state fact directly",
+    "fundamentally": "cut or state concrete reason",
+    "undeniably": "cut or provide empirical evidence",
+    "crucially": "cut or explain specific consequence",
+    "inherently": "cut or describe actual mechanism",
+    "testament to": "shows, demonstrates, proves"
 }
 
-# Transitions mécaniques françaises (Hard Blockers - Tolérance 0)
+# Transitions mécaniques et adverbes creux français (Hard Blockers - Tolérance 0)
 FR_MECHANICAL_TRANSITIONS = {
     "en conclusion": "aller droit au fait ou supprimer",
     "par conséquent": "donc, ainsi",
@@ -94,7 +106,49 @@ FR_MECHANICAL_TRANSITIONS = {
     "en outre": "aussi, de plus, ou supprimer",
     "il convient de noter": "supprimer ou énoncer directement",
     "il est important de noter": "supprimer ou énoncer directement",
-    "notamment": "en particulier, ou citer directement les exemples"
+    "notamment": "en particulier, ou citer directement les exemples",
+    "force est de constater": "énoncer directement le fait",
+    "il est indéniable que": "fournir la preuve ou supprimer",
+    "il va sans dire": "supprimer purement et simplement",
+    "au cœur de": "décrire le rôle ou le mécanisme précis",
+    "témoigne de": "montre, prouve, illustre",
+    "fondamentalement": "supprimer ou donner la raison concrète",
+    "incontestablement": "fournir la preuve empirique ou supprimer",
+    "indéniablement": "fournir la preuve empirique ou supprimer",
+    "intrinsèquement": "supprimer ou décrire la propriété exacte",
+    "crucialement": "supprimer ou expliquer la conséquence"
+}
+
+# Classification exhaustive des 54 types du détecteur avoid-ai-writing (patterns.js)
+# P0 (Credibility killers) & P1 (Obvious AI smell) + Hard blockers stricts -> Tolérance 0 (FAIL immédiat)
+NODE_HARD_BLOCKER_TYPES = {
+    # P0 — Credibility killers (Tolérance 0)
+    "cutoff-disclaimer", "chatbot", "vague-attribution", "significance-inflation",
+    "ai-placeholder", "ai-citation-markup", "normalization-flag", "reasoning-artifact",
+    "acknowledgment-loop", "hashtag-stuff",
+    # P1 — Obvious AI smell (Tolérance 0)
+    "tier1", "template-phrase", "tier3-phrase-cluster", "lets-construction",
+    "formulaic-opener", "speculative-opener", "future-narrative", "social-cta-closer",
+    "lingering-attention", "hedge-stack", "real-actual-inflation", "novelty-inflation",
+    "bullet-np-list", "launch-intro", "crowd-contrast", "fake-casual-prop",
+    "performed-insight", "negation-chain", "dev-blog-boilerplate", "ai-utm-source",
+    # Spécificités canoniques Henri / doc-version (Tolérance 0)
+    "em-dash", "transition", "generic-conclusion"
+}
+
+# P2 (Stylistic polish) & Stylométrique -> Soft Warnings (Régulés par le budget gradué mais sévère)
+# P2 (Stylistic polish) -> Soft Warnings lexicaux et phrastiques régulés par le budget gradué
+NODE_SOFT_WARNING_TYPES = {
+    "tier1-clarity", "tier2", "tier3", "tier3-phrase", "filler",
+    "hollow-intensifier", "sycophantic", "false-concession", "rhetorical-question",
+    "confidence-calibration", "parenthetical-hedge", "title-case-header",
+    "unnecessary-hyphenation", "formatting", "emotional-flatline"
+}
+
+# Signaux documentaires stylométriques / macro-structurels (audit consultatif sans fausser le budget de mots)
+NODE_STYLOMETRIC_TYPES = {
+    "uniformity", "low-ttr", "smart-punct-signature", "punct-distribution",
+    "fnword-trigram-entropy", "cross-para-burstiness"
 }
 
 
@@ -105,8 +159,10 @@ class StyleCheckResult:
     budget_max: int
     hard_blockers: List[Dict[str, Any]] = field(default_factory=list)
     soft_warnings: List[Dict[str, Any]] = field(default_factory=list)
+    stylometric_warnings: List[Dict[str, Any]] = field(default_factory=list)
     error_report: str = ""
     detected_language: str = "en"
+
 
     def to_iteration_dict(self, iteration: int = 1) -> Dict[str, Any]:
         """Convertit le résultat en dictionnaire d'itération structuré pour le suivi."""
@@ -179,6 +235,77 @@ def find_detect_js_script() -> Path:
         "Script detect.js de avoid-ai-writing introuvable. "
         "Veuillez vérifier l'emplacement de avoid-ai-writing ou définir AVOID_AI_WRITING_DETECT_JS."
     )
+
+
+def find_validate_js_script() -> Optional[Path]:
+    """Résout le chemin canonique vers validate.js de avoid-ai-writing."""
+    env_override = os.environ.get("AVOID_AI_WRITING_VALIDATE_JS")
+    if env_override and Path(env_override).is_file():
+        return Path(env_override).resolve()
+
+    for cand in DEFAULT_VALIDATE_JS_PATHS:
+        if cand.is_file():
+            return cand.resolve()
+
+    user_home = Path.home()
+    cand_dyn = user_home / "Documents" / "VoiceNotes" / "_agents" / "scripts-for-skills" / "avoid-ai-writing" / "detector" / "validate.js"
+    if cand_dyn.is_file():
+        return cand_dyn.resolve()
+
+    return None
+
+
+def run_preservation_validator(original_text: str, rewritten_text: str) -> Dict[str, Any]:
+    """
+    Exécute validate.js de avoid-ai-writing pour vérifier la non-régression structurelle
+    (fenced code, tables, frontmatter, heading tree, URLs, et non-prolifération des patterns IA).
+    """
+    if not original_text or not rewritten_text or original_text == rewritten_text:
+        return {"ok": True, "errors": [], "warnings": [], "stats": {}}
+
+    val_script = find_validate_js_script()
+    if not val_script:
+        return {"ok": True, "errors": [], "warnings": [], "stats": {}}
+
+    node_cmd = shutil.which("node")
+    if not node_cmd:
+        return {"ok": True, "errors": [], "warnings": [], "stats": {}}
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as f_orig:
+        f_orig.write(original_text)
+        p_orig = Path(f_orig.name)
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as f_new:
+        f_new.write(rewritten_text)
+        p_new = Path(f_new.name)
+
+    try:
+        cmd = [node_cmd, str(val_script), str(p_orig), str(p_new)]
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        errors = []
+        warnings = []
+        for line in res.stdout.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("error"):
+                errors.append(line_s)
+            elif line_s.startswith("warning"):
+                warnings.append(line_s)
+
+        return {
+            "ok": res.returncode == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "raw_output": res.stdout.strip()
+        }
+    except Exception as e:
+        return {"ok": True, "errors": [], "warnings": [f"Validation ignorée : {e}"], "stats": {}}
+    finally:
+        try:
+            p_orig.unlink()
+            p_new.unlink()
+        except Exception:
+            pass
+
 
 
 def mask_markdown_code_and_comments(text: str) -> str:
@@ -433,6 +560,8 @@ def check_style(
     # 1. Exécution du scan déterministe local
     hard_blockers = scan_deterministic_hard_blockers(text_for_audit, language=effective_lang, allowed_terms=allowed_set)
     soft_warnings = []
+    stylometric_warnings = []
+
 
     # 2. Exécution du moteur detect.js
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tmp:
@@ -459,26 +588,49 @@ def check_style(
         if allowed_set and (iss_text.lower() in allowed_set or any(re.search(rf"\b{re.escape(a)}\b", iss_text, re.I) for a in allowed_set)):
             continue
 
-        # Classification Hard Blockers (Tolérance 0)
-        if iss_type in ("tier1", "em-dash", "transition", "generic-conclusion",
-                        "normalization-flag", "chatbot", "reasoning-artifact",
-                        "cutoff-disclaimer", "ai-placeholder", "ai-citation-markup"):
+        # Classification Hard Blockers (Tolérance 0 - P0/P1)
+        if iss_type in NODE_HARD_BLOCKER_TYPES:
             hard_blockers.append({
                 "type": f"Hard Blocker ({iss_type})",
                 "line": line_num,
                 "term": iss_text,
                 "suggestion": iss_sug
             })
-        # Classification Soft Warnings (Tier 1B, Tier 2 clusters, Tier 3 densité)
-        elif iss_type in ("tier1-clarity", "tier2", "tier3", "tier3-phrase",
-                          "tier3-phrase-cluster", "filler", "hollow-intensifier",
-                          "template-phrase", "sycophantic"):
+        # Classification Soft Warnings (Régulés par le budget gradué mais sévère - P2)
+        elif iss_type in NODE_SOFT_WARNING_TYPES:
             soft_warnings.append({
                 "type": f"Soft Warning ({iss_type})",
                 "line": line_num,
                 "term": iss_text,
                 "suggestion": iss_sug
             })
+        # Diagnostics stylométriques globaux (non imputés sur le budget de mots)
+        elif iss_type in NODE_STYLOMETRIC_TYPES:
+            stylometric_warnings.append({
+                "type": f"Stylometric Signal ({iss_type})",
+                "line": line_num,
+                "term": iss_text,
+                "suggestion": iss_sug
+            })
+        else:
+            # Sécurité Zero-Trust : Zéro alerte ignorée
+            iss_sev = str(iss.get("severity", "")).lower()
+            if iss_sev in ("high", "p0", "p1"):
+                hard_blockers.append({
+                    "type": f"Hard Blocker ({iss_type})",
+                    "line": line_num,
+                    "term": iss_text,
+                    "suggestion": iss_sug
+                })
+            else:
+                soft_warnings.append({
+                    "type": f"Soft Warning ({iss_type})",
+                    "line": line_num,
+                    "term": iss_text,
+                    "suggestion": iss_sug
+                })
+
+
 
     # Normalisation reportée dans les stats de detect.js
     stats = raw_result.get("stats", {})
@@ -504,6 +656,7 @@ def check_style(
 
     hard_blockers = dedup_list(hard_blockers)
     soft_warnings = dedup_list(soft_warnings)
+    stylometric_warnings = dedup_list(stylometric_warnings)
 
     # Décision du verdict
     has_hard_blockers = len(hard_blockers) > 0
@@ -544,9 +697,11 @@ def check_style(
         budget_max=budget_max,
         hard_blockers=hard_blockers,
         soft_warnings=soft_warnings,
+        stylometric_warnings=stylometric_warnings,
         error_report=error_report,
         detected_language=effective_lang
     )
+
 
 
 def format_style_audit_summary(audit_data: Any) -> str:

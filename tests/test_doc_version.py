@@ -255,10 +255,14 @@ def test_fastmcp_server_tools(temp_cas_dir, monkeypatch):
         mode="draft"
     ))
     assert res_diff["status"] == "success"
-    assert "artifact_content" in res_diff
-    assert "TREE TOC" not in res_diff["artifact_content"] or "Arborescence" in res_diff["artifact_content"]
-    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in res_diff["artifact_content"]
-    assert "```text" in res_diff["artifact_content"]
+    assert "artifact_content" not in res_diff
+    assert res_diff["saved_artifact_path"] is not None
+    assert Path(res_diff["saved_artifact_path"]).exists()
+    diff_content = Path(res_diff["saved_artifact_path"]).read_text(encoding="utf-8")
+    assert "TREE TOC" not in diff_content or "Arborescence" in diff_content
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in diff_content
+    assert "```text" in diff_content
+
 
     # 4. restore_commit (dry_run)
     res_restore = json.loads(restore_commit(commit_id=c_id, dry_run=True))
@@ -306,7 +310,11 @@ def test_artifact_builder_recent_commits_and_no_ai_badges(temp_cas_dir, monkeypa
         mode="draft"
     ))
     assert res_diff["status"] == "success"
-    content = res_diff["artifact_content"]
+    assert "artifact_content" not in res_diff
+    assert res_diff["saved_artifact_path"] is not None
+    assert Path(res_diff["saved_artifact_path"]).exists()
+    content = Path(res_diff["saved_artifact_path"]).read_text(encoding="utf-8")
+
 
     # Invariant 1 : Exclusion formelle de la note d'audit et de la justification chirurgicale
     assert "Audit de Révision Draft & Seuil de Rétention" not in content
@@ -351,7 +359,9 @@ def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
         mode="draft"
     ))
     assert res_draft["status"] == "success"
-    art_draft = res_draft["artifact_content"]
+    assert "artifact_content" not in res_draft
+    assert res_draft["saved_artifact_path"] is not None
+    art_draft = Path(res_draft["saved_artifact_path"]).read_text(encoding="utf-8")
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in art_draft
     assert "```text\nVersion finale polie prête à copier.\n```" in art_draft
 
@@ -364,9 +374,12 @@ def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
         mode="paper"
     ))
     assert res_paper["status"] == "success"
-    art_paper = res_paper["artifact_content"]
+    assert "artifact_content" not in res_paper
+    assert res_paper["saved_artifact_path"] is not None
+    art_paper = Path(res_paper["saved_artifact_path"]).read_text(encoding="utf-8")
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" not in art_paper
     assert "```text" not in art_paper
+
 
 
 def test_preamble_institutional_header_no_false_deltas():
@@ -558,8 +571,10 @@ def test_git_sync_and_default_diff_with_latest_commit(tmp_path, monkeypatch):
         diff_explanation="Diff automatique contre HEAD~1"
     ))
     assert res_a["status"] == "success"
+    assert "artifact_content" not in res_a
+    assert res_a["saved_artifact_path"] is not None
+    content_a = Path(res_a["saved_artifact_path"]).read_text(encoding="utf-8")
     assert res_a["diff_count"] >= 1
-    content_a = res_a["artifact_content"]
     assert "initiale" in content_a
     assert "retouchee" in content_a
     assert "Commit 2 polish" in content_a
@@ -572,10 +587,13 @@ def test_git_sync_and_default_diff_with_latest_commit(tmp_path, monkeypatch):
         diff_explanation="Diff modifications en cours contre HEAD"
     ))
     assert res_b["status"] == "success"
+    assert "artifact_content" not in res_b
+    assert res_b["saved_artifact_path"] is not None
+    content_b = Path(res_b["saved_artifact_path"]).read_text(encoding="utf-8")
     assert res_b["diff_count"] >= 1
-    content_b = res_b["artifact_content"]
     assert "retouchee" in content_b
     assert "cours de travail" in content_b
+
 
 
 def test_span_diff_end_to_end_and_multiline():
@@ -646,9 +664,13 @@ def test_git_upstream_baseline_when_ahead(tmp_path, monkeypatch):
         diff_explanation="Diff global par rapport à la version distante"
     ))
     assert res["status"] == "success"
-    assert "Ajout commit 1." in res["artifact_content"]
-    assert "Ajout commit 2 final." in res["artifact_content"]
-    assert "Version Overleaf originale." in res["artifact_content"]
+    assert "artifact_content" not in res
+    assert res["saved_artifact_path"] is not None
+    content_res = Path(res["saved_artifact_path"]).read_text(encoding="utf-8")
+    assert "Ajout commit 1." in content_res
+    assert "Ajout commit 2 final." in content_res
+    assert "Version Overleaf originale." in content_res
+
 
 
 def test_commit_with_style_audit_iterations_and_resolution(temp_cas_dir, monkeypatch):
@@ -696,11 +718,14 @@ def test_commit_with_style_audit_iterations_and_resolution(temp_cas_dir, monkeyp
         from_commit_id=c_id
     ))
     assert res_diff["status"] == "success"
-    art = res_diff["artifact_content"]
+    assert "artifact_content" not in res_diff
+    assert res_diff["saved_artifact_path"] is not None
+    art = Path(res_diff["saved_artifact_path"]).read_text(encoding="utf-8")
 
     # Invariants d'affichage
     assert "| Boucle Anti-IA (Itérations & Résolutions) |" in art
     assert "2 itérations (T1: 3 pb (Tier 1: 1, Tier 2: 2) ➔ T2: 0 pb - PASS)" in art
+
 
 
 def test_record_style_audit_tool_integration(temp_cas_dir, monkeypatch):
@@ -787,8 +812,10 @@ def test_sequential_drafts_diff_against_immediate_parent(temp_cas_dir, monkeypat
         mode="draft"
     ))
     assert res_a["status"] == "success"
+    assert "artifact_content" not in res_a
+    assert res_a["saved_artifact_path"] is not None
     assert res_a["baseline_commit"] == c1["short_id"]
-    content_a = res_a["artifact_content"]
+    content_a = Path(res_a["saved_artifact_path"]).read_text(encoding="utf-8")
     # Le texte intermédiaire issu de Commit 1 doit être le texte de référence (seul "intermédiaire" -> "final validé" change)
     assert "intermédiaire" in content_a
     assert "final validé" in content_a
@@ -805,8 +832,10 @@ def test_sequential_drafts_diff_against_immediate_parent(temp_cas_dir, monkeypat
         mode="draft"
     ))
     assert res_b["status"] == "success"
+    assert "artifact_content" not in res_b
+    assert res_b["saved_artifact_path"] is not None
     assert res_b["baseline_commit"] == c0["short_id"]
-    content_b = res_b["artifact_content"]
+    content_b = Path(res_b["saved_artifact_path"]).read_text(encoding="utf-8")
     assert "m\'excuser" in content_b or "m'excuser" in content_b
     assert "retard" in content_b
 
@@ -819,9 +848,12 @@ def test_sequential_drafts_diff_against_immediate_parent(temp_cas_dir, monkeypat
         mode="draft"
     ))
     assert res_c["status"] == "success"
+    assert "artifact_content" not in res_c
+    assert res_c["saved_artifact_path"] is not None
     assert res_c["baseline_commit"] == c0["short_id"]
-    content_c = res_c["artifact_content"]
+    content_c = Path(res_c["saved_artifact_path"]).read_text(encoding="utf-8")
     assert "retard" in content_c
+
 
 
 def test_latex_command_filtering_and_nested_braces():
@@ -982,6 +1014,62 @@ def test_cas_baseline_selection_n_minus_1(temp_cas_dir, tmp_path):
     # Le commit le plus récent est c3, le commit parent N-1 est c2
     assert snaps[0]["commit_id"] == c3["commit_id"]
     assert snaps[1]["commit_id"] == c2["commit_id"]
+
+
+def test_get_diff_artifact_omits_content_and_returns_issues_for_iterative_refinement(temp_cas_dir, monkeypatch):
+    """
+    Valide rigoureusement le contrat d'arbitrage d'Henri :
+    1. artifact_content est OMIS du retour JSON pour ne pas surcharger le modèle.
+    2. L'artéfact est sauvegardé sur disque (saved_artifact_path non nul et existant).
+    3. Les métadonnées de statut et les problèmes détectés (issues, soft_warnings, retention)
+       sont exclusivement renvoyés pour alimenter la boucle de raffinage itérative.
+    """
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    # 1. Scellement baseline
+    c0 = json.loads(commit_document(
+        target="virtual:draft_refine",
+        content="Bonjour équipe, voici le premier jet à relire. Joyeusement, Henri",
+        message="v0 baseline",
+        author="henri",
+        mode="draft"
+    ))
+
+    # 2. Appel de get_diff_artifact
+    new_text = "Bonjour équipe, voici le premier jet à relire. Joyeusement, Henri"
+    res = json.loads(get_diff_artifact(
+        target="virtual:draft_refine",
+        content=new_text,
+        diff_explanation="Test contrat sans artifact_content",
+        from_commit_id=c0["commit_id"],
+        mode="draft",
+        language="fr"
+    ))
+
+    assert res["status"] == "success"
+    # Invariant 1 : Zéro surcharge de contexte, artifact_content est strictement absent du JSON
+    assert "artifact_content" not in res
+
+    # Invariant 2 : Sauvegarde sur disque garantie
+    assert "saved_artifact_path" in res
+    assert res["saved_artifact_path"] is not None
+    saved_file = Path(res["saved_artifact_path"])
+    assert saved_file.exists()
+    assert saved_file.stat().st_size > 0
+
+    # Invariant 3 : Métadonnées complètes pour la boucle de raffinage
+    assert "diff_count" in res
+    assert "modified_sections" in res
+    assert "style_verdict" in res
+    assert "soft_warnings_count" in res
+    assert "soft_warnings" in res
+    assert "issues" in res
+    assert "issues_count" in res
+    assert "retention_percent" in res
+    assert "is_retention_compliant" in res
+    assert res["is_retention_compliant"] is True
+
 
 
 

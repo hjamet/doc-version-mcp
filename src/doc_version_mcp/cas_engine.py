@@ -280,8 +280,26 @@ class CASEngine:
             except Exception:
                 continue
 
-        # Tri par timestamp décroissant
-        commits.sort(key=lambda c: c.get("timestamp", ""), reverse=True)
+        # Tri par timestamp décroissant avec profondeur parentale pour départager les timestamps identiques
+        parent_map = {c.get("commit_id"): c.get("parent_commit_id") for c in commits if c.get("commit_id")}
+        depth_memo: Dict[str, int] = {}
+
+        def get_depth(cid: str) -> int:
+            if not cid or cid not in parent_map:
+                return 0
+            if cid in depth_memo:
+                return depth_memo[cid]
+            p = parent_map.get(cid)
+            if p and p != cid and p in parent_map:
+                depth_memo[cid] = 1 + get_depth(p)
+            else:
+                depth_memo[cid] = 0
+            return depth_memo[cid]
+
+        commits.sort(
+            key=lambda c: (c.get("timestamp", ""), get_depth(c.get("commit_id", ""))),
+            reverse=True
+        )
         return commits[:limit]
 
     def prune_expired(
