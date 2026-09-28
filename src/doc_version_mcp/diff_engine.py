@@ -61,18 +61,18 @@ class DiffEngine:
             if match:
                 if curr_lines or curr_heading:
                     sections.append(SectionBlock(curr_heading, curr_level, curr_title, curr_lines))
-                curr_heading = line
                 curr_level = len(match.group(1))
                 raw_t = match.group(2).strip()
-                for _ in range(5):
-                    raw_t = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
-                    raw_t = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
-                    raw_t = re.sub(r'\\(?:textit|emph|textsl)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', raw_t)
-                    raw_t = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', raw_t)
+                from .latex_resolver import LatexToMarkdownConverter
+                raw_t = LatexToMarkdownConverter.unwrap_font_commands(raw_t, to_markdown=False)
+                raw_t = LatexToMarkdownConverter.strip_html_and_styles(raw_t)
                 raw_t = re.sub(r'\\label\{[^}]+\}', '', raw_t).strip()
                 raw_t = re.sub(r'^\*\*(.*?)\*\*$', r'\1', raw_t).strip()
+                raw_t = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', raw_t)
+                raw_t = re.sub(r'[\{\}]', '', raw_t)
                 raw_t = re.sub(r'\s+', ' ', raw_t).strip()
                 curr_title = raw_t
+                curr_heading = f"{match.group(1)} {curr_title}"
                 curr_lines = []
             else:
                 curr_lines.append(line)
@@ -138,6 +138,8 @@ class DiffEngine:
         text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', repl_inline, text)
 
         from .latex_resolver import LatexToMarkdownConverter
+        text = LatexToMarkdownConverter.strip_html_and_styles(text)
+        text = LatexToMarkdownConverter.convert_special_callouts(text)
         text = LatexToMarkdownConverter.unwrap_boxes(text)
 
         # Environnements de mise en page (minipage, center, flushleft, flushright, tcolorbox)
@@ -164,20 +166,9 @@ class DiffEngine:
         text = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', '', text)
         text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
 
-        for _ in range(5):
-            text = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'**\1**', text)
-            text = re.sub(r'\\textit\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\emph\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', text)
-            text = re.sub(r'\\textsf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textsl\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\textsc\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textup\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textmd\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textrm\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textnormal\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\underline\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        # Déballage récursif robuste des polices inline et suppression de tout résidu orphelin
+        text = LatexToMarkdownConverter.unwrap_font_commands(text, to_markdown=True)
+        text = LatexToMarkdownConverter.strip_html_and_styles(text)
 
         # Espacements et sauts
         text = re.sub(r'\\label\{[^}]+\}', '', text)
@@ -196,7 +187,7 @@ class DiffEngine:
         text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
         text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
         # Configuration et métadonnées parasites
@@ -229,7 +220,7 @@ class DiffEngine:
 
         text = re.sub(r'\\(?:newcommand|renewcommand|providecommand)\*?\s*\{\\[a-zA-Z]+\}(?:\[\d+\])?\{.*?\}', '', text, flags=re.DOTALL)
         text = re.sub(r'\\nocite\*?(?:\{[^}]*\})?', '', text)
-        text = re.sub(r'\\(?:bibliography|bibliographystyle)(?:\{[^}]*\}|[a-zA-Z0-9_-]+)?', '', text)
+        text = re.sub(r'\\(?:bibliography|bibliographystyle)\s*(?:\{[^}]*\}|[a-zA-Z0-9_\-]+)?', '', text)
 
         text = re.sub(r'\\xspace\s*([,.:;!?\'"\)\}\]])', r'\1', text)
         text = re.sub(r'\\xspace\b\s*', ' ', text)
@@ -239,6 +230,9 @@ class DiffEngine:
         text = re.sub(r'\\+\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\\+\s*\|', '|', text)
 
+        # Deuxième passe de sécurisation : suppression de toute commande de police orpheline restante
+        text = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', text)
+
         # Nettoyage des accolades résiduelles de groupement AVANT de restaurer math_map
         for _ in range(3):
             text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
@@ -246,6 +240,7 @@ class DiffEngine:
         # Nettoyage des accolades fermantes orphelines
         text = re.sub(r'\*\*\}([ \t]*)', '** ', text)
         text = re.sub(r'\*\}\b', '* ', text)
+        text = re.sub(r'(?<!\\)\}(?!\$)', '', text)
 
         # Restauration des blocs mathématiques KaTeX intacts
         for token, math_content in math_map.items():
@@ -277,6 +272,9 @@ class DiffEngine:
                     if next_h2:
                         text = after[next_h2.start():]
 
+        # Nettoyage du bloc texte final prêt à copier s'il est présent
+        text = re.sub(r'<details><summary>📋\s*Texte Final Prêt à Copier</summary>.*?</details>\s*(?:---\s*)?', '', text, flags=re.DOTALL)
+
         # Nettoyage des anciens callouts
         text = re.sub(
             r'>\s*\[!NOTE\]\s*\n>\s*\*\*🔄\s*Synthèse des Travaux Récents & Conciliation Collaborative\*\*.*?(?=(?:\n(?!>))|\Z)',
@@ -300,7 +298,8 @@ class DiffEngine:
         # Déballer le texte balisé en ajout
         text = re.sub(r'<ins\b[^>]*>(.*?)</ins>', r'\1', text, flags=re.DOTALL)
         text = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', r'\1', text, flags=re.DOTALL)
-        text = re.sub(r'</?span[^>]*>', '', text)
+        from .latex_resolver import LatexToMarkdownConverter
+        text = LatexToMarkdownConverter.strip_html_and_styles(text)
 
         lines = text.splitlines()
         clean_lines = []

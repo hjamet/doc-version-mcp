@@ -405,18 +405,17 @@ class LatexToMarkdownConverter:
                     break
                 open_brace_idx = m.end() - 1
                 inner, end_idx = LatexMacroEngine.extract_braced_group(text, open_brace_idx)
-                # Nettoyer l'intérieur du titre pour qu'il soit propre
+                # Nettoyer l'intérieur du titre pour qu'il soit rigoureusement propre
                 clean_title = inner.strip()
-                for _ in range(5):
-                    clean_title = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
-                    clean_title = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
-                    clean_title = re.sub(r'\\(?:textit|emph|textsl)\{((?:[^{}]|{[^{}]*})*)\}', r'\1', clean_title)
-                    clean_title = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', clean_title)
+                clean_title = self.unwrap_font_commands(clean_title, to_markdown=False)
                 clean_title = self.clean_layout_formatting(clean_title)
                 clean_title = self.clean_inline_formatting(clean_title).strip()
+                clean_title = self.strip_html_and_styles(clean_title)
                 clean_title = re.sub(r'\\label\{[^}]+\}', '', clean_title).strip()
                 clean_title = re.sub(r'^\*\*(.*?)\*\*$', r'\1', clean_title).strip()
-                clean_title = re.sub(r'\s+', ' ', clean_title)
+                clean_title = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', clean_title)
+                clean_title = re.sub(r'[\{\}]', '', clean_title)
+                clean_title = re.sub(r'\s+', ' ', clean_title).strip()
                 text = text[:m.start()] + f"\n\n{md_prefix} {clean_title}\n\n" + text[end_idx:]
 
         text = re.sub(r'\\label\{[^}]+\}', '', text)
@@ -489,7 +488,10 @@ class LatexToMarkdownConverter:
             text,
             flags=re.DOTALL
         )
-        text = re.sub(r'\\\[(.*?)\\\]', lambda m: f"\n\n$$\n{re.sub(r'\\\\label\\{[^}]+\\}', '', m.group(1)).strip()}\n$$\n\n", text, flags=re.DOTALL)
+        def repl_bracket(m):
+            clean_c = re.sub(r'\\label\{[^}]+\}', '', m.group(1)).strip()
+            return f"\n\n$$\n{clean_c}\n$$\n\n"
+        text = re.sub(r'\\\[(.*?)\\\]', repl_bracket, text, flags=re.DOTALL)
         text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
 
         # Normalisation des blocs $$ déjà existants pour garantir doubles dollars sur leurs propres lignes
@@ -783,6 +785,173 @@ class LatexToMarkdownConverter:
         return text
 
     @classmethod
+    def strip_html_and_styles(cls, text: str) -> str:
+        """
+        Élimine rigoureusement et récursivement tout fragment HTML parasite :
+        <style>...</style>, <span>...</span>, balises fermantes orphelines, et attributs style="...".
+        """
+        if not text:
+            return ""
+        # 1. Élimination complète des blocs <style>...</style>
+        text = re.sub(r'<style\b[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        # 2. Déballage récursif de toutes les balises <span> (diff, couleurs, etc.)
+        for _ in range(8):
+            prev = text
+            text = re.sub(r'<span\b[^>]*>(.*?)</span>', r'\1', text, flags=re.DOTALL)
+            if text == prev:
+                break
+        # 3. Déballage des balises <font>, <div>, etc.
+        for tag in ('font', 'div', 'p'):
+            for _ in range(5):
+                prev = text
+                text = re.sub(rf'<{tag}\b[^>]*>(.*?)</{tag}>', r'\1', text, flags=re.DOTALL)
+                if text == prev:
+                    break
+        # 4. Suppression de toutes les balises orphelines </span>, <span...>, </style>, etc.
+        text = re.sub(r'</?(?:span|style|font|div)\b[^>]*>', '', text)
+        # 5. Suppression de tout attribut style="..." résiduel
+        text = re.sub(r'\s*style="[^"]*"', '', text)
+        return text
+
+    @classmethod
+    def convert_special_callouts(cls, text: str) -> str:
+        """
+        Convertit les macros de callouts scientifiques (acmcallout, rqbox, formaldef)
+        en blocs Markdown natifs clairs même si les \\newcommand ne sont pas présents.
+        """
+        if not text:
+            return ""
+
+        # 1. \acmcallout{Title}{Body}
+        pattern_callout = re.compile(r'\\acmcallout\s*\{')
+        while True:
+          m = pattern_callout.search(text)
+          if not m:
+            break
+          title, idx1 = LatexMacroEngine.extract_braced_group(text, m.end() - 1)
+          m_ws = re.match(r'\s*', text[idx1:])
+          curr = idx1 + (m_ws.end() if m_ws else 0)
+          if curr < len(text) and text[curr] == '{':
+            body, idx2 = LatexMacroEngine.extract_braced_group(text, curr)
+            text = (
+                text[: m.start()]
+                + f'\n\n**{title.strip()}:** {body.strip()}\n\n'
+                + text[idx2:]
+            )
+          else:
+            text = (
+                text[: m.start()] + f'\n\n**{title.strip()}**\n\n' + text[idx1:]
+            )
+
+        # 2. \rqbox{Title}{Body}
+        pattern_rqbox = re.compile(r'\\rqbox\s*\{')
+        while True:
+          m = pattern_rqbox.search(text)
+          if not m:
+            break
+          title, idx1 = LatexMacroEngine.extract_braced_group(text, m.end() - 1)
+          m_ws = re.match(r'\s*', text[idx1:])
+          curr = idx1 + (m_ws.end() if m_ws else 0)
+          if curr < len(text) and text[curr] == '{':
+            body, idx2 = LatexMacroEngine.extract_braced_group(text, curr)
+            text = (
+                text[: m.start()]
+                + f'\n\n**{title.strip()}:** {body.strip()}\n\n'
+                + text[idx2:]
+            )
+          else:
+            text = (
+                text[: m.start()] + f'\n\n**{title.strip()}**\n\n' + text[idx1:]
+            )
+
+        # 3. \formaldef{Title}{Body}
+        pattern_fdef = re.compile(r'\\formaldef\s*\{')
+        while True:
+          m = pattern_fdef.search(text)
+          if not m:
+            break
+          title, idx1 = LatexMacroEngine.extract_braced_group(text, m.end() - 1)
+          m_ws = re.match(r'\s*', text[idx1:])
+          curr = idx1 + (m_ws.end() if m_ws else 0)
+          if curr < len(text) and text[curr] == '{':
+            body, idx2 = LatexMacroEngine.extract_braced_group(text, curr)
+            text = (
+                text[: m.start()]
+                + f'\n\n**Definition ({title.strip()}):** *{body.strip()}*\n\n'
+                + text[idx2:]
+            )
+          else:
+            text = (
+                text[: m.start()]
+                + f'\n\n**Definition ({title.strip()})**\n\n'
+                + text[idx1:]
+            )
+
+        return text
+
+    @classmethod
+    def unwrap_font_commands(cls, text: str, to_markdown: bool = True) -> str:
+        """
+        Déballe récursivement toutes les commandes de polices et formats LaTeX,
+        avec gestion complète des accolades imbriquées et suppression de tout résidu orphelin.
+        """
+        if not text:
+            return ""
+
+        # 1. Commandes de couleur avec corps: \textcolor{...}{body} ou \textcolor[...]{...}{body}
+        pattern_textcolor = re.compile(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{')
+        while True:
+            m = pattern_textcolor.search(text)
+            if not m:
+                break
+            open_brace = m.end() - 1
+            inner, end_idx = LatexMacroEngine.extract_braced_group(text, open_brace)
+            text = text[:m.start()] + inner + text[end_idx:]
+
+        # 2. Commandes de polices inline
+        cmd_map = {
+            'textbf': ('**', '**') if to_markdown else ('', ''),
+            'textit': ('*', '*') if to_markdown else ('', ''),
+            'emph': ('*', '*') if to_markdown else ('', ''),
+            'textsl': ('*', '*') if to_markdown else ('', ''),
+            'texttt': ('`', '`') if to_markdown else ('', ''),
+            'textsf': ('', ''),
+            'textsc': ('', ''),
+            'textup': ('', ''),
+            'textmd': ('', ''),
+            'textrm': ('', ''),
+            'textnormal': ('', ''),
+            'underline': ('', ''),
+            'text': ('', ''),
+        }
+        names = "|".join(cmd_map.keys())
+        pattern_cmd = re.compile(r'\\(' + names + r')\s*\{')
+
+        for _ in range(15):
+            m = pattern_cmd.search(text)
+            if not m:
+                break
+            pos = 0
+            pieces = []
+            while True:
+                m = pattern_cmd.search(text, pos)
+                if not m:
+                    pieces.append(text[pos:])
+                    break
+                pieces.append(text[pos:m.start()])
+                cmd_name = m.group(1)
+                open_brace = m.end() - 1
+                inner, end_idx = LatexMacroEngine.extract_braced_group(text, open_brace)
+                prefix, suffix = cmd_map.get(cmd_name, ('', ''))
+                pieces.append(f"{prefix}{inner}{suffix}")
+                pos = end_idx
+            text = "".join(pieces)
+
+        # 3. Élimination des commandes orphelines sans fermeture (ex: \textsf{ ou \textbf{ mal formées)
+        text = re.sub(r'\\(' + names + r')(?:\*|\b)\s*(?:\{|\b(?![a-zA-Z]))', '', text)
+        return text
+
+    @classmethod
     def unwrap_boxes(cls, text: str) -> str:
         """
         Déballe récursivement les boîtes de mise en page LaTeX :
@@ -1022,7 +1191,8 @@ class LatexToMarkdownConverter:
         return text
 
     def clean_layout_formatting(self, text: str) -> str:
-        """Filtre et nettoie les commandes et balises de mise en page LaTeX brutes."""
+        text = self.strip_html_and_styles(text)
+        text = self.convert_special_callouts(text)
         text = self.unwrap_boxes(text)
 
         # 1. Environnements de mise en page (minipage, center, flushleft, flushright)
@@ -1060,7 +1230,7 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
         text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
         text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
 
@@ -1079,7 +1249,7 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:institution|city|country|state|postcode|streetaddress)\{[^{}]*\}', '', text)
 
         # Bibliographie résiduelle
-        text = re.sub(r'\\(?:bibliographystyle|bibliography)(?:\{[^}]*\})?', '', text)
+        text = re.sub(r'\\(?:bibliographystyle|bibliography)\s*(?:\{[^}]*\}|[a-zA-Z0-9_\-]+)?', '', text)
         text = re.sub(r'\\nocite\*?(?:\{[^}]*\})?', '', text)
 
         # 6. Caractères et symboles spéciaux
@@ -1118,21 +1288,9 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\$\$.*?\$\$', repl_display, text, flags=re.DOTALL)
         text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', repl_inline, text)
 
-        # Déballage des polices inline récursif
-        for _ in range(5):
-            text = re.sub(r'\\textbf\{((?:[^{}]|{[^{}]*})*)\}', r'**\1**', text)
-            text = re.sub(r'\\textit\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\emph\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\texttt\{((?:[^{}]|{[^{}]*})*)\}', r'`\1`', text)
-            text = re.sub(r'\\textsf\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textsl\{((?:[^{}]|{[^{}]*})*)\}', r'*\1*', text)
-            text = re.sub(r'\\textsc\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textup\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textmd\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textrm\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\textnormal\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\underline\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
-            text = re.sub(r'\\text\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        # Déballage des polices inline récursif et suppression de tout tag HTML parasite
+        text = self.unwrap_font_commands(text, to_markdown=True)
+        text = self.strip_html_and_styles(text)
 
         text = re.sub(r'\\eqref\{([^}]+)\}', r'(\1)', text)
         text = re.sub(r'\\(?:ref|autoref|pageref)\{([^}]+)\}', r'[\1]', text)
@@ -1148,7 +1306,7 @@ class LatexToMarkdownConverter:
         text = BibTexParser.decode_latex_accents(text)
         text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|small|footnotesize|scriptsize|large|Large|LARGE|huge|Huge)\b[ \t]*', ' ', text)
         text = re.sub(r'\\label\{[^}]+\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
         text = re.sub(r'\\dimexpr\b[^{}]*(?:\\relax)?', '', text)
         text = re.sub(r'\\relax\b', '', text)
@@ -1159,6 +1317,9 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\ding\{51\}', '✓', text)
         text = re.sub(r'\\ding\{55\}', '✗', text)
 
+        # Deuxième passe de sécurisation : suppression de toute commande de police orpheline restante
+        text = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', text)
+
         # Nettoyage des accolades résiduelles de groupement AVANT de restaurer math_map !
         for _ in range(3):
             text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
@@ -1166,6 +1327,7 @@ class LatexToMarkdownConverter:
         # Nettoyage des accolades fermantes orphelines
         text = re.sub(r'\*\*\}([ \t]*)', '** ', text)
         text = re.sub(r'\*\}\b', '* ', text)
+        text = re.sub(r'(?<!\\)\}(?!\$)', '', text)
 
         # Restauration des blocs mathématiques KaTeX intacts
         for token, math_content in math_map.items():
@@ -1279,5 +1441,18 @@ class LatexToMarkdownConverter:
                 doc_parts.append(self.bib_parser.format_full_reference(k))
 
         final_md = "\n\n".join(doc_parts)
+        final_md, math_map = self.mask_math(final_md)
+        final_md = self.strip_html_and_styles(final_md)
+        final_md = self.unwrap_font_commands(final_md, to_markdown=True)
+        final_md = re.sub(r'\\(?:bibliographystyle|bibliography)\s*(?:\{[^}]*\}|[a-zA-Z0-9_\-]+)?', '', final_md)
+        final_md = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', final_md)
+        final_md = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', final_md)
+        final_md = re.sub(r'\*\*\}([ \t]*)', '** ', final_md)
+        final_md = re.sub(r'\*\}\b', '* ', final_md)
+        for _ in range(3):
+            final_md = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', final_md)
+        final_md = re.sub(r'(?<!\\)\}(?!\$)', '', final_md)
+        final_md = self.unmask_math(final_md, math_map)
         formatted = self.format_paragraphs(final_md)
         return self.sanitize_callouts(formatted)
+

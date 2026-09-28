@@ -1071,6 +1071,69 @@ def test_get_diff_artifact_omits_content_and_returns_issues_for_iterative_refine
     assert res["is_retention_compliant"] is True
 
 
+def test_latex_font_html_stripping_and_draft_copy_block(temp_cas_dir, monkeypatch):
+    """
+    Valide l'élimination des balises et fonctions LaTeX imbriquées (\\textsf, \\textbf, \\textit, etc.),
+    la purge des fragments HTML/styles (<span>, <style>, etc.), et la génération propre du bloc dépliant
+    prêt à copier en préservant KaTeX.
+    """
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    latex_input = r"""
+    \section{\textsf{\textbf{Section Intitulée}}}
+    <style>.header { color: red; }</style>
+    Voici un paragraphe contenant <span style="font-weight: bold;">du texte gras</span> et
+    \textsf{\textbf{des polices sans empattement imbriquées}} ainsi que \emph{\textit{de l'italique double}}.
+    Une boîte résiduelle \fcolorbox{black}{white}{Texte dans boîte} et une formule $\arg\max_{c \in \mathcal{C}}^{(k)} \cos(\mathbf{e}_q, \mathbf{e}_c)$.
+    """
+
+    # 1. Test unitaire LatexToMarkdownConverter
+    md = LatexToMarkdownConverter.convert_text(latex_input)
+    assert r"\textsf{" not in md
+    assert r"\textbf{" not in md
+    assert r"\textit{" not in md
+    assert r"\emph{" not in md
+    assert "<style>" not in md
+    assert "<span" not in md
+    assert "</span>" not in md
+    assert "style=" not in md
+    assert r"\fcolorbox" not in md
+    assert "Section Intitulée" in md
+    assert "^{(k)}" in md
+
+    # 2. Test unitaire ArtifactBuilder.clean_for_copy
+    copy_text = ArtifactBuilder.clean_for_copy(latex_input)
+    assert r"\textsf{" not in copy_text
+    assert r"\textbf{" not in copy_text
+    assert "<style>" not in copy_text
+    assert "<span" not in copy_text
+    assert "^{(k)}" in copy_text
+
+    # 3. Test de get_diff_artifact en mode draft
+    c0 = json.loads(commit_document(
+        target="manuscript_latex.tex",
+        message="v0",
+        content="Version initiale.",
+        author="henri",
+        mode="draft"
+    ))
+
+    res = json.loads(get_diff_artifact(
+        target="manuscript_latex.tex",
+        content=latex_input,
+        diff_explanation="Test purge latex et html",
+        from_commit_id=c0["commit_id"],
+        mode="draft"
+    ))
+    assert res["status"] == "success"
+    saved_art = Path(res["saved_artifact_path"]).read_text(encoding="utf-8")
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in saved_art
+    assert r"\textsf{" not in saved_art
+    assert "<style>" not in saved_art
+
+
+
 
 
 

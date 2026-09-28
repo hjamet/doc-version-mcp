@@ -150,7 +150,23 @@ class ArtifactBuilder:
         return "\n".join(rows) + "\n\n---\n\n"
 
     @classmethod
+    def clean_for_copy(cls, text: str) -> str:
+        """
+        Nettoie et formate le texte pour le bloc dépliant prêt à copier :
+        - Déballe les polices LaTeX résiduelles (\\textsf, \\textbf, etc.)
+        - Supprime les balises et styles HTML (<span>, <style>, etc.)
+        - Supprime les commandes et environnements LaTeX résiduels
+        - Préserve les blocs KaTeX et le texte pur
+        """
+        if not text:
+            return ""
+        from .diff_engine import DiffEngine
+        clean_text = DiffEngine.clean_residual_latex(text)
+        return clean_text.strip()
+
+    @classmethod
     def assemble_brain_artifact(
+
         cls,
         target_name: str,
         annotated_body: str,
@@ -215,10 +231,11 @@ class ArtifactBuilder:
         # 4. Bloc dépliant de texte final prêt à copier (mode draft)
         copy_block = ""
         if mode == "draft" and final_content and final_content.strip():
+            clean_copy = cls.clean_for_copy(final_content)
             copy_block = (
                 f"<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n"
                 f"```text\n"
-                f"{final_content.strip()}\n"
+                f"{clean_copy}\n"
                 f"```\n"
                 f"</details>\n\n"
                 f"---\n\n"

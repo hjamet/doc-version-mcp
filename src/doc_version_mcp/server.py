@@ -425,13 +425,17 @@ def get_diff_artifact(
         def is_latex_doc(t: str) -> bool:
             if not t:
                 return False
-            return bool(re.search(r'\\(?:documentclass|begin\{document\}|section|subsection|begin\{minipage\}|usepackage|begin\{table|fontsize|selectfont|hrule|vspace)\b', t))
+            return bool(re.search(r'\\(?:documentclass|begin\{|section|subsection|subsubsection|paragraph|subparagraph|usepackage|fontsize|selectfont|hrule|vspace|hspace|textbf|textit|textsf|texttt|emph|parbox|fcolorbox|colorbox|cite|citep|citet|newcommand|def\s*\\|caption|includegraphics|centering|rowcolor|checkmark|texttimes|acmcallout|rqbox|formaldef)\b', t))
 
         if is_latex_doc(old_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in old_text):
             old_text = LatexToMarkdownConverter.convert_text(old_text, base_dir=base_dir, brain_dir=b_dir)
 
         if is_latex_doc(new_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in new_text):
             new_text = LatexToMarkdownConverter.convert_text(new_text, base_dir=base_dir, brain_dir=b_dir)
+
+        # Nettoyage systématique des fragments HTML et styles résiduels
+        old_text = LatexToMarkdownConverter.strip_html_and_styles(old_text)
+        new_text = LatexToMarkdownConverter.strip_html_and_styles(new_text)
 
         # Détermination du nom cible propre
         if artifact_name and artifact_name.strip():
