@@ -410,7 +410,22 @@ class ArtifactBuilder:
             if clean_ref.startswith(("http://", "https://", "data:")):
                 return clean_ref, clean_ref
 
-            clean_ref = re.sub(r'^file:///?', '', clean_ref).split('?')[0].split('#')[0]
+            if clean_ref.startswith(("file://", "file:/")):
+                clean_ref = re.sub(r'^file:///?', '', clean_ref).split('?')[0].split('#')[0]
+
+            # Si clean_ref contient des balises HTML issues de diffs visuels (<span style="...">)
+            if "<span" in clean_ref:
+                # 1. Version nouvelle (verte / ajoutée) : élimination des spans rouges (suppressions)
+                new_ref = re.sub(r'<span[^>]*(?:#fee2e2|#991b1b)[^>]*>.*?</span>', '', clean_ref, flags=re.DOTALL)
+                new_ref = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', new_ref, flags=re.DOTALL).strip()
+                # 2. Version ancienne (rouge / supprimée) : élimination des spans verts (ajouts)
+                old_ref = re.sub(r'<span[^>]*(?:#dcfce7|#166534)[^>]*>.*?</span>', '', clean_ref, flags=re.DOTALL)
+                old_ref = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', old_ref, flags=re.DOTALL).strip()
+
+                if old_ref and old_ref != clean_ref and "<span" not in old_ref:
+                    locate_and_copy_image(old_ref)
+                if new_ref and new_ref != clean_ref and "<span" not in new_ref:
+                    return locate_and_copy_image(new_ref)
 
             found_target: Optional[Path] = None
             p_abs = Path(clean_ref)

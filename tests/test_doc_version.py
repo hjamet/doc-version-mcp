@@ -606,6 +606,37 @@ Voici une image inexistante : ![[image_introuvable.png]]
     assert any("image_introuvable.png" in record.message for record in caplog.records)
 
 
+def test_diff_annotated_image_span_resolution(tmp_path):
+    """Valide la résolution et copie physique des images dont le chemin contient des balises de diff HTML."""
+    vault_dir = tmp_path / "Vault"
+    vault_dir.mkdir()
+    (vault_dir / ".obsidian").mkdir()
+    att_dir = vault_dir / "_attachments"
+    att_dir.mkdir()
+    old_img = att_dir / "old_logo.png"
+    old_img.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_old")
+    new_img = att_dir / "new_logo.png"
+    new_img.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_new")
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+
+    # Chemin d'image annoté avec des balises de diff
+    md_input = 'Image d\'en-tête : Image: "[[_attachments/<span style=\\"background-color: #fee2e2; color: #991b1b;\\">old_logo</span><span style=\\"background-color: #dcfce7; color: #166534;\\">new_logo</span>.png]]"'
+
+    formatted = ArtifactBuilder.format_images_for_brain(
+        markdown_text=md_input,
+        brain_target_dir=brain_dir,
+        source_dir=vault_dir
+    )
+
+    # Les deux images (ancienne et nouvelle) doivent avoir été copiées physiquement
+    assert (brain_dir / "old_logo.png").is_file()
+    assert (brain_dir / "new_logo.png").is_file()
+    assert (brain_dir / "old_logo.png").read_bytes() == old_img.read_bytes()
+    assert (brain_dir / "new_logo.png").read_bytes() == new_img.read_bytes()
+
+
 def test_latex_convert_figures_markdown_standard(tmp_path):
     """Valide que les figures LaTeX sont converties en Markdown standard et non en wikilinks."""
     tex_snippet = r"""
