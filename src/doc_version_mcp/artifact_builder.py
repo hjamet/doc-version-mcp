@@ -618,8 +618,8 @@ class ArtifactBuilder:
             parts = inner.split('|')
             raw_path = parts[0].strip()
             safe_name, file_url = locate_and_copy_image(raw_path)
-            alt = parts[1].strip() if len(parts) > 1 and not parts[1].strip().isdigit() else Path(safe_name).stem.replace('_', ' ')
-            alt = re.sub(r'_[0-9a-fA-F]{8}$', '', alt)
+            stem_clean = re.sub(r'_[0-9a-fA-F]{8}$', '', Path(safe_name).stem)
+            alt = parts[1].strip() if len(parts) > 1 and not parts[1].strip().isdigit() else stem_clean.replace('_', ' ')
             if file_url:
                 return f"\n\n![{alt}]({file_url})\n\n"
             return f"\n\n![{alt}]({raw_path})\n\n"
@@ -628,8 +628,8 @@ class ArtifactBuilder:
             alt = m.group(1).strip()
             src = m.group(2).strip()
             safe_name, file_url = locate_and_copy_image(src)
-            clean_alt = alt if (alt and not alt.isdigit()) else Path(safe_name).stem.replace('_', ' ')
-            clean_alt = re.sub(r'_[0-9a-fA-F]{8}$', '', clean_alt)
+            stem_clean = re.sub(r'_[0-9a-fA-F]{8}$', '', Path(safe_name).stem)
+            clean_alt = alt if (alt and not alt.isdigit()) else stem_clean.replace('_', ' ')
             if file_url:
                 return f"\n\n![{clean_alt}]({file_url})\n\n"
             return f"\n\n![{clean_alt}]({src})\n\n"
