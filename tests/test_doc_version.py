@@ -363,7 +363,7 @@ def test_copy_ready_foldable_block_draft_vs_paper(temp_cas_dir, monkeypatch):
     assert res_draft["saved_artifact_path"] is not None
     art_draft = Path(res_draft["saved_artifact_path"]).read_text(encoding="utf-8")
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in art_draft
-    assert "```text\nVersion finale polie prête à copier.\n```" in art_draft
+    assert "````text\nVersion finale polie prête à copier.\n````" in art_draft
 
     # 2. Mode paper -> Ne doit PAS contenir le bloc dépliant ni le bloc de code text
     res_paper = json.loads(get_diff_artifact(
@@ -1131,6 +1131,91 @@ def test_latex_font_html_stripping_and_draft_copy_block(temp_cas_dir, monkeypatc
     assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in saved_art
     assert r"\textsf{" not in saved_art
     assert "<style>" not in saved_art
+
+
+def test_dynamic_code_fencing_in_draft_copy_block(temp_cas_dir, monkeypatch):
+    """
+    Vérifie le fencing dynamique de code CommonMark / GFM pour le bloc prêt à copier :
+    1. Test unitaire direct de ArtifactBuilder.get_dynamic_fence
+    2. Document avec blocs de code triples backticks (ex: ```sql ... ```) -> fence à 4 backticks (````text)
+    3. Document avec blocs de code à 4 backticks (ex: ````markdown ... ````) -> fence à 5 backticks (`````text)
+    4. Absence de rupture d'accordéon (pas de fermeture prématurée par un sous-bloc interne)
+    """
+    # 1. Tests unitaires get_dynamic_fence
+    assert ArtifactBuilder.get_dynamic_fence("") == "````"
+    assert ArtifactBuilder.get_dynamic_fence("Texte simple sans backticks") == "````"
+    assert ArtifactBuilder.get_dynamic_fence("Texte avec `inline code`") == "````"
+    assert ArtifactBuilder.get_dynamic_fence("Texte avec ```sql\nSELECT 1;\n```") == "````"
+    assert ArtifactBuilder.get_dynamic_fence("Texte avec ````markdown\nfoo\n````") == "`````"
+    assert ArtifactBuilder.get_dynamic_fence("Texte avec `````5 backticks`````") == "``````"
+
+    # 2. Test avec get_diff_artifact en mode draft contenant des blocs ```sql et ```python
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    markdown_with_code = (
+        "# Activité RAG Socratique\n\n"
+        "Voici un exemple de requête SQL :\n\n"
+        "```sql\n"
+        "SELECT id, query FROM interactions WHERE score > 0.8;\n"
+        "```\n\n"
+        "Et un script Python associé :\n\n"
+        "```python\n"
+        "def run_query():\n"
+        "    return execute_sql()\n"
+        "```\n\n"
+        "Fin du document.\n"
+    )
+
+    c0 = json.loads(commit_document(
+        target="activity_rag.md",
+        message="v0",
+        content="Version initiale.",
+        author="henri",
+        mode="draft"
+    ))
+
+    res = json.loads(get_diff_artifact(
+        target="activity_rag.md",
+        content=markdown_with_code,
+        diff_explanation="Test dynamic fencing with triple backticks",
+        from_commit_id=c0["commit_id"],
+        mode="draft"
+    ))
+    assert res["status"] == "success"
+    saved_art = Path(res["saved_artifact_path"]).read_text(encoding="utf-8")
+
+    # Doit contenir le bloc dépliant avec fence à 4 backticks
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n````text\n" in saved_art
+    # La fermeture du fence doit être à 4 backticks suivi de la fermeture de details
+    assert "\n````\n</details>\n\n---\n" in saved_art
+    # Le contenu interne avec triple backticks doit être présent intact
+    assert "```sql\nSELECT id, query FROM interactions WHERE score > 0.8;\n```" in saved_art
+
+    # 3. Test avec contenu contenant 4 backticks internes -> Doit générer 5 backticks
+    markdown_with_quad_backticks = (
+        "# Guide Antigravity\n\n"
+        "Exemple d'inclusion de bloc markdown :\n\n"
+        "````markdown\n"
+        "```python\n"
+        "print('nested')\n"
+        "```\n"
+        "````\n"
+    )
+
+    res_quad = json.loads(get_diff_artifact(
+        target="guide_quad.md",
+        content=markdown_with_quad_backticks,
+        diff_explanation="Test dynamic fencing with quad backticks",
+        from_commit_id=c0["commit_id"],
+        mode="draft"
+    ))
+    assert res_quad["status"] == "success"
+    saved_art_quad = Path(res_quad["saved_artifact_path"]).read_text(encoding="utf-8")
+
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n`````text\n" in saved_art_quad
+    assert "\n`````\n</details>\n\n---\n" in saved_art_quad
+    assert "````markdown\n```python\nprint('nested')\n```\n````" in saved_art_quad
 
 
 

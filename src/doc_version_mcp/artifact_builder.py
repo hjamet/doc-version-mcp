@@ -165,6 +165,20 @@ class ArtifactBuilder:
         return clean_text.strip()
 
     @classmethod
+    def get_dynamic_fence(cls, text: str, min_fence_len: int = 4) -> str:
+        """
+        Calcule dynamiquement la clôture de code CommonMark (backticks) nécessaire
+        pour encapsuler un texte sans risque d'échappement par des sous-blocs internes.
+        N = max(min_fence_len, M + 1) où M est le nombre maximal de backticks consécutifs dans text.
+        """
+        if not text:
+            return "`" * min_fence_len
+        backtick_matches = re.findall(r'`+', text)
+        m = max((len(match) for match in backtick_matches), default=0)
+        n = max(min_fence_len, m + 1)
+        return "`" * n
+
+    @classmethod
     def assemble_brain_artifact(
 
         cls,
@@ -232,11 +246,12 @@ class ArtifactBuilder:
         copy_block = ""
         if mode == "draft" and final_content and final_content.strip():
             clean_copy = cls.clean_for_copy(final_content)
+            fence = cls.get_dynamic_fence(clean_copy, min_fence_len=4)
             copy_block = (
                 f"<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n"
-                f"```text\n"
+                f"{fence}text\n"
                 f"{clean_copy}\n"
-                f"```\n"
+                f"{fence}\n"
                 f"</details>\n\n"
                 f"---\n\n"
             )
