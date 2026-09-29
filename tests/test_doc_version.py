@@ -521,6 +521,91 @@ def test_image_copying_and_formatting_in_brain(tmp_path):
     assert f"file:///{b_posix}/unil_logo.png" in formatted
 
 
+def test_obsidian_vault_image_resolution_and_physical_copy(tmp_path, caplog):
+    """
+    Valide la résolution d'images dans un coffre Obsidian :
+    - Image dans _attachments/ateliers/ (résolue depuis un sous-dossier de notes sans slash)
+    - Image dans _attachments/ à la racine du coffre
+    - Image récursivement dans une sous-arborescence du coffre
+    - Image introuvable : warning loggé et aucun lien file:/// erroné inséré
+    """
+    import logging
+    vault_dir = tmp_path / "ObsidianVault"
+    vault_dir.mkdir()
+    (vault_dir / ".obsidian").mkdir()
+
+    # Sous-dossier d'attachements avec sous-dossier ateliers (conforme au vault d'Henri)
+    attachments_dir = vault_dir / "_attachments"
+    ateliers_dir = attachments_dir / "ateliers"
+    ateliers_dir.mkdir(parents=True)
+    img_atelier = ateliers_dir / "lab2_img_17.png"
+    img_atelier.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_atelier_17")
+
+    img_root_att = attachments_dir / "vault_diagram.png"
+    img_root_att.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_vault_diagram")
+
+    deep_dir = vault_dir / "projets" / "recherche" / "figures"
+    deep_dir.mkdir(parents=True)
+    img_deep = deep_dir / "latent_space_map.png"
+    img_deep.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_latent_map")
+
+    # Note située en profondeur dans enseignements/aib2026/ateliers/
+    note_dir = vault_dir / "enseignements" / "aib2026" / "ateliers"
+    note_dir.mkdir(parents=True)
+
+    brain_dir = tmp_path / "brain_dir"
+    brain_dir.mkdir()
+
+    md_input = """# Atelier RAG
+
+Image d'en-tête YAML :
+Image: "[[_attachments/ateliers/lab2_img_17.png]]"
+
+Voici l'image de l'atelier sans slash : ![[lab2_img_17.png|Figure 17]]
+Voici le diagramme du coffre : ![[vault_diagram.png]]
+Voici une image trouvée récursivement : ![Espace Latent](latent_space_map.png)
+Voici une image inexistante : ![[image_introuvable.png]]
+"""
+
+    with caplog.at_level(logging.WARNING):
+        formatted = ArtifactBuilder.format_images_for_brain(
+            markdown_text=md_input,
+            brain_target_dir=brain_dir,
+            source_dir=note_dir
+        )
+
+    # 1. Vérification de la présence physique des images copiées sur disque dans brain_dir
+    copied_atelier = brain_dir / "lab2_img_17.png"
+    copied_diagram = brain_dir / "vault_diagram.png"
+    copied_deep = brain_dir / "latent_space_map.png"
+
+    assert copied_atelier.is_file(), "lab2_img_17.png doit être physiquement copié dans brain_dir"
+    assert copied_atelier.read_bytes() == img_atelier.read_bytes()
+
+    assert copied_diagram.is_file(), "vault_diagram.png doit être physiquement copié dans brain_dir"
+    assert copied_diagram.read_bytes() == img_root_att.read_bytes()
+
+    assert copied_deep.is_file(), "latent_space_map.png doit être physiquement copié dans brain_dir"
+    assert copied_deep.read_bytes() == img_deep.read_bytes()
+
+    # 2. Vérification que l'image introuvable n'a pas été copiée
+    copied_missing = brain_dir / "image_introuvable.png"
+    assert not copied_missing.exists()
+
+    # 3. Vérification des liens dans le texte formaté
+    b_posix = brain_dir.resolve().as_posix().lstrip('/')
+    assert f"file:///{b_posix}/lab2_img_17.png" in formatted
+    assert f"file:///{b_posix}/vault_diagram.png" in formatted
+    assert f"file:///{b_posix}/latent_space_map.png" in formatted
+
+    # Pour l'image inexistante, le lien file:/// ne doit JAMAIS être inséré (évite Preview unavailable)
+    assert f"file:///{b_posix}/image_introuvable.png" not in formatted
+    assert "image_introuvable.png" in formatted
+
+    # 4. Vérification qu'un warning explicite a été loggé pour l'image introuvable
+    assert any("image_introuvable.png" in record.message for record in caplog.records)
+
+
 def test_latex_convert_figures_markdown_standard(tmp_path):
     """Valide que les figures LaTeX sont converties en Markdown standard et non en wikilinks."""
     tex_snippet = r"""

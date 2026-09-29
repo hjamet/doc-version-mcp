@@ -5,9 +5,12 @@ artifact_builder.py — Assemblage normé d'artéfacts Markdown Antigravity avec
 import re
 import os
 import shutil
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactBuilder:
@@ -297,7 +300,8 @@ class ArtifactBuilder:
         cls,
         markdown_text: str,
         brain_target_dir: Path,
-        source_dir: Optional[Path] = None
+        source_dir: Optional[Path] = None,
+        vault_root: Optional[Path] = None
     ) -> str:
         """
         Normalise les images Markdown (wikilinks ou liens standard) pour pointer en URL file:///
@@ -306,35 +310,106 @@ class ArtifactBuilder:
         brain_target_dir.mkdir(parents=True, exist_ok=True)
         b_posix = brain_target_dir.resolve().as_posix().lstrip('/')
 
+        # 1. Extraction de source_dir depuis le commentaire SOURCE_FILE si non fourni
+        if not source_dir:
+            src_match = re.search(r'<!--\s*SOURCE_FILE:\s*([^\n\r]+?)\s*-->', markdown_text)
+            if src_match:
+                cand_src = Path(src_match.group(1).strip())
+                if cand_src.is_file() or cand_src.parent.exists():
+                    source_dir = cand_src.parent
+
+        # 2. Détection du vault_root Obsidian ou Git repo si non fourni
+        if not vault_root and source_dir:
+            curr = source_dir.resolve()
+            for p in [curr] + list(curr.parents):
+                if (p / ".obsidian").is_dir():
+                    vault_root = p
+                    break
+            if not vault_root:
+                for p in [curr] + list(curr.parents):
+                    if (p / "_attachments").is_dir() or (p / ".git").is_dir():
+                        vault_root = p
+                        break
+
+        if not vault_root:
+            curr_cwd = Path.cwd().resolve()
+            for p in [curr_cwd] + list(curr_cwd.parents):
+                if (p / ".obsidian").is_dir():
+                    vault_root = p
+                    break
+            if not vault_root:
+                default_vault = Path.home() / "Documents" / "VoiceNotes"
+                if (default_vault / ".obsidian").is_dir():
+                    vault_root = default_vault
+
+        # 3. Construction ordonnée des dossiers de recherche prioritaires
+        seen_dirs = set()
         search_dirs: List[Path] = []
+
+        def add_dir(d: Optional[Path]):
+            if d is None:
+                return
+            try:
+                d_res = d.resolve()
+                if d_res.is_dir() and d_res not in seen_dirs:
+                    seen_dirs.add(d_res)
+                    search_dirs.append(d_res)
+                    if d_res.name.lower() in ("_attachments", "attachments"):
+                        for root, dirs, _ in os.walk(d_res):
+                            for sd in dirs:
+                                p_sd = Path(root) / sd
+                                if p_sd.resolve() not in seen_dirs:
+                                    seen_dirs.add(p_sd.resolve())
+                                    search_dirs.append(p_sd.resolve())
+            except Exception:
+                pass
+
+        # Dossier de destination (si l'image y existe déjà)
+        add_dir(brain_target_dir)
+
+        # Dossier source et sous-dossiers immédiats
         if source_dir:
             s_res = source_dir.resolve()
-            search_dirs.extend([
-                s_res,
-                s_res / "figures",
-                s_res / "assets",
-                s_res / "images",
-                s_res / "_attachments"
-            ])
-            if s_res.parent.exists():
-                search_dirs.extend([
-                    s_res.parent,
-                    s_res.parent / "figures",
-                    s_res.parent / "assets",
-                    s_res.parent / "images"
-                ])
-        cwd = Path.cwd()
-        search_dirs.extend([
-            cwd,
-            cwd / "figures",
-            cwd / "assets",
-            cwd / "images"
-        ])
+            add_dir(s_res)
+            add_dir(s_res / "_attachments")
+            add_dir(s_res / "figures")
+            add_dir(s_res / "assets")
+            add_dir(s_res / "images")
+
+            # Parents jusqu'au vault_root
+            for parent in s_res.parents:
+                add_dir(parent)
+                add_dir(parent / "_attachments")
+                add_dir(parent / "figures")
+                add_dir(parent / "assets")
+                add_dir(parent / "images")
+                if vault_root and parent.resolve() == vault_root.resolve():
+                    break
+
+        # Vault root et sous-dossiers canoniques
+        if vault_root:
+            v_res = vault_root.resolve()
+            add_dir(v_res)
+            add_dir(v_res / "_attachments")
+            add_dir(v_res / "figures")
+            add_dir(v_res / "assets")
+            add_dir(v_res / "images")
+
+        # CWD
+        cwd = Path.cwd().resolve()
+        add_dir(cwd)
+        add_dir(cwd / "_attachments")
+        add_dir(cwd / "figures")
+        add_dir(cwd / "assets")
+        add_dir(cwd / "images")
 
         check_exts = [".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf", ".gif"]
 
-        def locate_and_copy_image(raw_ref: str) -> Tuple[str, str]:
+        def locate_and_copy_image(raw_ref: str) -> Tuple[str, Optional[str]]:
             clean_ref = raw_ref.strip().strip('"{}\'')
+            if clean_ref.startswith(("http://", "https://", "data:")):
+                return clean_ref, clean_ref
+
             clean_ref = re.sub(r'^file:///?', '', clean_ref).split('?')[0].split('#')[0]
 
             found_target: Optional[Path] = None
@@ -342,34 +417,53 @@ class ArtifactBuilder:
             if p_abs.is_file():
                 found_target = p_abs
             else:
+                target_filename = Path(clean_ref).name
+                # 1. Dossiers de recherche prioritaires
                 for b_dir in search_dirs:
                     if not b_dir.exists() or not b_dir.is_dir():
                         continue
-                    # 1. Chemin direct relatif
+                    # Chemin direct relatif
                     cand = b_dir / clean_ref
                     if cand.is_file():
                         found_target = cand
                         break
-                    # 2. Nom de fichier seul dans le sous-dossier
-                    cand_name = b_dir / Path(clean_ref).name
+                    # Nom de fichier seul
+                    cand_name = b_dir / target_filename
                     if cand_name.is_file():
                         found_target = cand_name
                         break
-                    # 3. Essayer avec extensions si pas d'extension
+                    # Essai avec extensions si pas d'extension
                     if not Path(clean_ref).suffix:
                         for ext in check_exts:
                             cand_ext = b_dir / f"{clean_ref}{ext}"
                             if cand_ext.is_file():
                                 found_target = cand_ext
                                 break
-                            cand_ext_name = b_dir / f"{Path(clean_ref).name}{ext}"
+                            cand_ext_name = b_dir / f"{target_filename}{ext}"
                             if cand_ext_name.is_file():
                                 found_target = cand_ext_name
                                 break
                         if found_target:
                             break
 
-            # Rastérisation PyMuPDF si PDF trouvé
+                # 2. Recherche récursive dans vault_root ou source_dir
+                if not found_target and (vault_root or source_dir):
+                    search_root = vault_root or source_dir
+                    names_to_try = [target_filename]
+                    if not Path(clean_ref).suffix:
+                        names_to_try.extend([f"{target_filename}{ext}" for ext in check_exts])
+                    for n in names_to_try:
+                        for root, dirs, files in os.walk(search_root):
+                            dirs[:] = [d for d in dirs if d not in {".git", ".obsidian", ".venv", "node_modules", ".trash", "$RECYCLE.BIN"}]
+                            if n in files:
+                                cand = Path(root) / n
+                                if cand.is_file():
+                                    found_target = cand
+                                    break
+                        if found_target:
+                            break
+
+            # Rastérisation PyMuPDF si PDF
             if found_target and found_target.suffix.lower() == ".pdf":
                 try:
                     import pymupdf
@@ -380,23 +474,42 @@ class ArtifactBuilder:
                         raster_name = f"{found_target.stem}.png".replace(" ", "_")
                         raster_png = brain_target_dir / raster_name
                         pix.save(str(raster_png))
-                        return raster_name, f"file:///{b_posix}/{raster_name}"
-                except Exception:
-                    pass
+                        if raster_png.is_file():
+                            return raster_name, f"file:///{b_posix}/{raster_name}"
+                except Exception as e:
+                    logger.warning("Erreur lors de la conversion PDF -> PNG pour '%s': %s", found_target, e)
 
+            # Copie physique vers brain_target_dir
             if found_target and found_target.is_file():
                 safe_name = found_target.name.replace(" ", "_")
                 dest_file = brain_target_dir / safe_name
                 try:
                     if found_target.resolve() != dest_file.resolve():
                         shutil.copy2(found_target, dest_file)
-                except Exception:
-                    pass
-                return safe_name, f"file:///{b_posix}/{safe_name}"
+                except Exception as e:
+                    logger.warning("Erreur lors de la copie physique de '%s' vers '%s': %s", found_target, dest_file, e)
 
-            # Si introuvable sur disque, préserver le nom propre dans brain
+                if dest_file.is_file():
+                    return safe_name, f"file:///{b_posix}/{safe_name}"
+                else:
+                    logger.warning("Fichier image copié non trouvé sur le disque : '%s'", dest_file)
+
+            # Si l'image n'est pas trouvée ou n'a pas pu être copiée :
+            # logger un avertissement explicite et ne pas insérer de lien file:/// pour éviter l'erreur 'Preview unavailable'
+            logger.warning(
+                "Image introuvable sur disque ou non copiée vers brain_dir : '%s' "
+                "(source_dir='%s', vault_root='%s'). Le lien file:/// n'a pas été inséré.",
+                raw_ref,
+                source_dir,
+                vault_root
+            )
             safe_name = Path(clean_ref).name.replace(" ", "_")
-            return safe_name, f"file:///{b_posix}/{safe_name}"
+            return safe_name, None
+
+        # Copie éventuelle des images référencées dans le frontmatter YAML : Image: "[[...]]"
+        for m in re.finditer(r'Image:\s*"\[\[(.*?)\]\]"', markdown_text):
+            raw_img = m.group(1).split('|')[0].strip()
+            locate_and_copy_image(raw_img)
 
         def repl_wikilink(m):
             inner = m.group(1).strip()
@@ -404,14 +517,18 @@ class ArtifactBuilder:
             raw_path = parts[0].strip()
             safe_name, file_url = locate_and_copy_image(raw_path)
             alt = parts[1].strip() if len(parts) > 1 and not parts[1].strip().isdigit() else Path(safe_name).stem.replace('_', ' ')
-            return f"\n\n![{alt}]({file_url})\n\n"
+            if file_url:
+                return f"\n\n![{alt}]({file_url})\n\n"
+            return f"\n\n![{alt}]({raw_path})\n\n"
 
         def repl_md(m):
             alt = m.group(1).strip()
             src = m.group(2).strip()
             safe_name, file_url = locate_and_copy_image(src)
             clean_alt = alt if (alt and not alt.isdigit()) else Path(safe_name).stem.replace('_', ' ')
-            return f"\n\n![{clean_alt}]({file_url})\n\n"
+            if file_url:
+                return f"\n\n![{clean_alt}]({file_url})\n\n"
+            return f"\n\n![{clean_alt}]({src})\n\n"
 
         text = re.sub(r'!\[\[(.*?)\]\]', repl_wikilink, markdown_text)
         text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', repl_md, text)
