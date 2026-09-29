@@ -458,6 +458,64 @@ class DiffEngine:
         return text
 
     @classmethod
+    def sanitize_inline_code_in_diff(cls, text: str) -> str:
+        """
+        Garantit qu'aucune balise HTML de diff (<span...>, <ins...>, <del...>)
+        n'est piégée à l'intérieur de backticks Markdown (`...`), ce qui causerait
+        l'affichage du HTML brut dans Obsidian et Antigravity.
+        Inverse l'imbrication pour placer les délimiteurs de code inline
+        À L'INTÉRIEUR des balises span de diff :
+        `<span ...>`ancien`</span><span ...>`nouveau`</span>` au lieu de `<span ...>...</span>`.
+        """
+        if not text or '`' not in text:
+            return text
+
+        code_span_pattern = re.compile(
+            r'(?<!`)(`{1,3})(?!`)(.+?)(?<!`)\1(?!`)',
+            re.DOTALL
+        )
+
+        diff_tag_pattern = re.compile(
+            r'(<(?:span|ins|del)\b[^>]*>.*?</(?:span|ins|del)>)',
+            re.DOTALL
+        )
+
+        def fix_code_span(match: re.Match) -> str:
+            fence = match.group(1)
+            inner = match.group(2)
+
+            if not re.search(r'</?(?:span|ins|del)\b', inner):
+                return match.group(0)
+
+            parts = diff_tag_pattern.split(inner)
+            out_parts = []
+            for part in parts:
+                if not part:
+                    continue
+                m_tag = re.match(r'^(<(?:span|ins|del)\b[^>]*>)(.*?)(</(?:span|ins|del)>)$', part, re.DOTALL)
+                if m_tag:
+                    open_tag = m_tag.group(1)
+                    tag_content = m_tag.group(2)
+                    close_tag = m_tag.group(3)
+
+                    if tag_content.startswith(fence) and tag_content.endswith(fence) and len(tag_content) >= 2 * len(fence):
+                        out_parts.append(f"{open_tag}{tag_content}{close_tag}")
+                    else:
+                        out_parts.append(f"{open_tag}{fence}{tag_content}{fence}{close_tag}")
+                else:
+                    if part.strip():
+                        leading_ws = part[:len(part) - len(part.lstrip(' '))]
+                        trailing_ws = part[len(part.rstrip(' ')):]
+                        core = part.strip(' ')
+                        out_parts.append(f"{leading_ws}{fence}{core}{fence}{trailing_ws}")
+                    else:
+                        out_parts.append(part)
+
+            return "".join(out_parts)
+
+        return code_span_pattern.sub(fix_code_span, text)
+
+    @classmethod
     def wrap_inline_block(cls, text: str, tag: str = "span", style: str = "", extra_attrs: str = "") -> str:
         """Enrobe le texte dans <tag style="...">...</tag> en préservant les préfixes Markdown."""
         lines = text.splitlines(keepends=True)
@@ -579,6 +637,7 @@ class DiffEngine:
             for tok, fig in new_figures.items():
                 res_text = res_text.replace(tok, fig)
             res_text = cls.sanitize_katex_in_diff(res_text)
+            res_text = cls.sanitize_inline_code_in_diff(res_text)
             return res_text.splitlines(), max(1, loc_add) if (loc_add > 0 or col_add == 0) else 0, 0, col_add, 0
 
         if not new_text.strip() or not cls.has_substantive_words(new_text):
@@ -586,10 +645,12 @@ class DiffEngine:
             if is_collab:
                 formatted_del = cls.format_del(old_text, is_collab=True, author=author_name)
                 formatted_del = cls.sanitize_katex_in_diff(formatted_del)
+                formatted_del = cls.sanitize_inline_code_in_diff(formatted_del)
                 return formatted_del.splitlines(), 0, 0, 0, del_count
             else:
                 formatted_del = cls.format_del(old_text, is_collab=False, author="agent")
                 formatted_del = cls.sanitize_katex_in_diff(formatted_del)
+                formatted_del = cls.sanitize_inline_code_in_diff(formatted_del)
                 return formatted_del.splitlines(), 0, del_count, 0, 0
 
         # Isolation des tables et figures
@@ -599,7 +660,9 @@ class DiffEngine:
         new_masked, new_figures = cls.mask_figures_in_text(new_masked)
 
         token_pattern = re.compile(
-            r'___MD_TABLE_[A-Z0-9_]+___|___MD_FIGURE_[A-Z0-9_]+___|\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|\s+|\w+|[^\w\s]',
+            r'___MD_TABLE_[A-Z0-9_]+___|___MD_FIGURE_[A-Z0-9_]+___|\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
+            r'(?<!`)`{3}(?!`)(?:[^`\n]|`{1,2}(?!`))+`{3}(?!`)|(?<!`)`{2}(?!`)(?:[^`\n]|`(?!=`))+`{2}(?!`)|(?<!`)`[^`\n]+`(?!`)|'
+            r'\s+|\w+|[^\w\s]',
             re.DOTALL | re.UNICODE
         )
         old_tokens = token_pattern.findall(old_masked)
@@ -662,6 +725,7 @@ class DiffEngine:
             diff_text = diff_text.replace(f_tok, f_str)
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
+        diff_text = cls.sanitize_inline_code_in_diff(diff_text)
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
         return clean_lines, local_add, local_del, collab_add, collab_del

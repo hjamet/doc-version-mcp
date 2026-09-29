@@ -272,7 +272,19 @@ class ArtifactBuilder:
                 w_rows.append(f"| {t} | {l} | `{term}` | {sug} |")
             warnings_block = "\n".join(w_rows) + "\n\n</details>\n\n---\n\n"
 
-        full_doc = f"{header}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
+        # 6. Lien cliquable vers le fichier source physique
+        source_link_block = ""
+        if source_file and not source_file.startswith("virtual:"):
+            try:
+                p = Path(source_file)
+                if p.is_file() or p.exists():
+                    posix_path = p.as_posix().lstrip('/')
+                    file_url = f"file:///{posix_path}"
+                    source_link_block = f"📄 **Fichier Source** : [{p.name}]({file_url})\n\n"
+            except Exception:
+                pass
+
+        full_doc = f"{header}{source_link_block}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
         if diff_explanation.strip():
             full_doc = cls.inject_explanation_callout(full_doc, diff_explanation.strip())
 

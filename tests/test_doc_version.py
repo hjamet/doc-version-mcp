@@ -1218,6 +1218,66 @@ def test_dynamic_code_fencing_in_draft_copy_block(temp_cas_dir, monkeypatch):
     assert "````markdown\n```python\nprint('nested')\n```\n````" in saved_art_quad
 
 
+def test_inline_code_span_diff_no_raw_html():
+    """Vérifie que les diffs sur du code inline ne piègent aucune balise HTML à l'intérieur de backticks."""
+    old_text = "4. **Step 4 - Socratic LLM** (Type: LLM): Groq `llama-3.3-70b-versatile` ==`gpt-oss-20b`== inference applying the Socratic pedagogical guardrail prompt."
+    new_text = "4. **Step 4 - Socratic LLM** (Type: LLM): Google `gemini-3.5-flash-lite` inference applying the Socratic pedagogical guardrail prompt."
+
+    lines, l_add, l_del, c_add, c_del = DiffEngine.diff_section_lines([old_text], [new_text])
+    assert len(lines) >= 1
+    diff_line = lines[0]
+
+    # Vérification 1 : aucune balise <span ou </span n'est à l'intérieur de backticks
+    code_spans = re.findall(r'(?<!`)`([^`\n]+)`(?!`)', diff_line)
+    for span_content in code_spans:
+        assert "<span" not in span_content, f"Balise <span trouvée à l'intérieur de code inline: {span_content}"
+        assert "</span>" not in span_content, f"Balise </span> trouvée à l'intérieur de code inline: {span_content}"
+        assert "<ins" not in span_content
+        assert "<del" not in span_content
+
+    # Vérification 2 : les spans de coloration existent bien et entourent le code inline
+    assert '<span style="background-color: #fee2e2;' in diff_line
+    assert '<span style="background-color: #dcfce7;' in diff_line
+    assert "`gemini-3.5-flash-lite`" in diff_line
+    assert "`llama-3.3-70b-versatile`" in diff_line
+
+    # Vérification 3 : Test de sanitize_inline_code_in_diff directement sur un cas mal formé
+    malformed = "Options: `<span style=\"color:red\">--old-flag</span><span style=\"color:green\">--new-flag</span>` active"
+    cleaned = DiffEngine.sanitize_inline_code_in_diff(malformed)
+    assert "`<span" not in cleaned
+    assert "</span>`" not in cleaned
+    assert '<span style="color:red">`--old-flag`</span><span style="color:green">`--new-flag`</span>' in cleaned
+
+
+def test_artifact_builder_source_file_link(tmp_path):
+    """Vérifie qu'un fichier source physique sur disque génère bien la ligne de lien cliquable."""
+    src_file = tmp_path / "Mon_Document_Source.md"
+    src_file.write_text("# Titre", encoding="utf-8")
+
+    art = ArtifactBuilder.assemble_brain_artifact(
+        target_name="Mon_Document_Source.md",
+        annotated_body="Contenu du document",
+        tree_toc="├── Titre",
+        diff_count=1,
+        diff_explanation="Mise à jour du document",
+        source_file=str(src_file)
+    )
+
+    expected_url = f"file:///{src_file.as_posix().lstrip('/')}"
+    assert f"📄 **Fichier Source** : [Mon_Document_Source.md]({expected_url})" in art
+
+    # Vérifie qu'un draft virtuel ne génère PAS cette ligne
+    virtual_art = ArtifactBuilder.assemble_brain_artifact(
+        target_name="draft.md",
+        annotated_body="Contenu virtuel",
+        tree_toc="├── Titre",
+        diff_count=0,
+        source_file="virtual:new_project_draft"
+    )
+    assert "📄 **Fichier Source**" not in virtual_art
+
+
+
 
 
 
