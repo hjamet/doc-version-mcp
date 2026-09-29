@@ -23,6 +23,15 @@ class SectionBlock:
         return ' '.join(cleaned.split())
 
 
+class CalloutBlock:
+    """Représentation d'un bloc callout Markdown (> [!TYPE] ...) pour le moteur AST diff."""
+    def __init__(self, raw_text: str, c_type: str, title: str, lines: List[str]):
+        self.raw_text = raw_text
+        self.c_type = c_type
+        self.title = title
+        self.lines = lines
+
+
 class DiffEngine:
     """Moteur de comparaison différentielle chirurgicale par sections AST."""
 
@@ -303,11 +312,22 @@ class DiffEngine:
 
         lines = text.splitlines()
         clean_lines = []
+        quote_buffer = []
         for line in lines:
             stripped = line.strip()
             if stripped.startswith(('> [!CAUTION]', '> [!FAILURE]', '> [!FAIL]', '> [!DANGER]')):
                 continue
-            clean_lines.append(line)
+            if stripped.startswith('>'):
+                quote_buffer.append(line)
+            else:
+                if quote_buffer:
+                    if cls.has_substantive_words("\n".join(quote_buffer)):
+                        clean_lines.extend(quote_buffer)
+                    quote_buffer = []
+                clean_lines.append(line)
+        if quote_buffer:
+            if cls.has_substantive_words("\n".join(quote_buffer)):
+                clean_lines.extend(quote_buffer)
 
         result_lines = [re.sub(r'[ \t]{2,}', ' ', l) for l in clean_lines]
         body = "\n".join(result_lines).strip()
@@ -410,6 +430,70 @@ class DiffEngine:
                 i += 1
 
         return "".join(out_lines), table_map
+
+    @classmethod
+    def extract_callouts(cls, text: str) -> Tuple[str, List[CalloutBlock]]:
+        """Extrait les blocs callouts Markdown (> [!TYPE] ...) et les remplace par des marqueurs atomiques."""
+        lines = text.splitlines(keepends=True)
+        out_lines: List[str] = []
+        callouts: List[CalloutBlock] = []
+        i = 0
+        n = len(lines)
+
+        while i < n:
+            line = lines[i]
+            s = line.strip()
+            m_start = re.match(r'^>\s*\[!([a-zA-Z]+)\]\s*(.*)$', s)
+            if m_start:
+                c_type = m_start.group(1).upper()
+                c_title = m_start.group(2).strip()
+                c_lines = [line]
+                i += 1
+                while i < n:
+                    curr = lines[i]
+                    curr_s = curr.strip()
+                    if re.match(r'^>\s*\[!([a-zA-Z]+)\]', curr_s):
+                        break
+                    if curr_s.startswith('>') or (not curr_s and i + 1 < n and lines[i + 1].strip().startswith('>')):
+                        c_lines.append(curr)
+                        i += 1
+                    else:
+                        break
+                raw = "".join(c_lines)
+                callout = CalloutBlock(raw, c_type, c_title, c_lines)
+                idx = len(callouts)
+                callouts.append(callout)
+                token = f"___MD_CALLOUT_BLOCK_{idx}___"
+                suffix = "\n" if raw.endswith("\n") else ""
+                out_lines.append(token + suffix)
+            else:
+                out_lines.append(line)
+                i += 1
+
+        return "".join(out_lines), callouts
+
+    @classmethod
+    def diff_callout_pair(
+        cls,
+        old_c: CalloutBlock,
+        new_c: CalloutBlock,
+        is_collab: bool = False,
+        author_name: str = ""
+    ) -> Tuple[str, int, int, int, int]:
+        """Compare chirurgicalement deux callouts appariés."""
+        if old_c.raw_text == new_c.raw_text:
+            return new_c.raw_text, 0, 0, 0, 0
+
+        old_l = [l.rstrip('\r\n') for l in old_c.lines]
+        new_l = [l.rstrip('\r\n') for l in new_c.lines]
+        diffed_lines, l_add, l_del, c_add, c_del = cls.diff_section_lines(
+            old_l, new_l,
+            is_collab=is_collab,
+            author_name=author_name,
+            in_callout_diff=True
+        )
+        suffix = "\n" if new_c.raw_text.endswith("\n") else ""
+        return "\n".join(diffed_lines) + suffix, l_add, l_del, c_add, c_del
 
     @classmethod
     def sanitize_table_pipes_in_diff(cls, lines: List[str]) -> List[str]:
@@ -594,7 +678,8 @@ class DiffEngine:
         new_lines: List[str],
         is_collab: bool = False,
         author_name: str = "",
-        head_lines: Optional[List[str]] = None
+        head_lines: Optional[List[str]] = None,
+        in_callout_diff: bool = False
     ) -> Tuple[List[str], int, int, int, int]:
         """
         Compare chirurgicalement les lignes d'une section spécifique via difflib.SequenceMatcher(autojunk=False).
@@ -659,8 +744,99 @@ class DiffEngine:
         old_masked, old_figures = cls.mask_figures_in_text(old_masked)
         new_masked, new_figures = cls.mask_figures_in_text(new_masked)
 
+        pair_diffs: Dict[str, str] = {}
+        deleted_callouts: Dict[str, str] = {}
+        added_callouts: Dict[str, str] = {}
+        callout_l_add = 0
+        callout_l_del = 0
+        callout_c_add = 0
+        callout_c_del = 0
+
+        if not in_callout_diff:
+            old_masked_c, old_callouts = cls.extract_callouts(old_masked)
+            new_masked_c, new_callouts = cls.extract_callouts(new_masked)
+
+            if old_callouts or new_callouts:
+                matched_pairs: List[Tuple[int, int]] = []
+                used_old: Set[int] = set()
+                used_new: Set[int] = set()
+
+                for i, oc in enumerate(old_callouts):
+                    for j, nc in enumerate(new_callouts):
+                        if j not in used_new and oc.raw_text.strip() == nc.raw_text.strip():
+                            matched_pairs.append((i, j))
+                            used_old.add(i)
+                            used_new.add(j)
+                            break
+
+                candidates = []
+                for i, oc in enumerate(old_callouts):
+                    if i in used_old:
+                        continue
+                    w1 = set(re.findall(r'\w+', oc.raw_text.lower()))
+                    for j, nc in enumerate(new_callouts):
+                        if j in used_new:
+                            continue
+                        w2 = set(re.findall(r'\w+', nc.raw_text.lower()))
+                        jaccard = len(w1 & w2) / max(len(w1 | w2), 1)
+                        ratio = difflib.SequenceMatcher(None, oc.raw_text, nc.raw_text, autojunk=False).ratio()
+                        type_bonus = 0.15 if oc.c_type == nc.c_type else 0.0
+                        score = max(jaccard, ratio) + type_bonus
+                        if score >= 0.30:
+                            candidates.append((score, i, j))
+
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                for score, i, j in candidates:
+                    if i not in used_old and j not in used_new:
+                        matched_pairs.append((i, j))
+                        used_old.add(i)
+                        used_new.add(j)
+
+                for pair_idx, (i, j) in enumerate(matched_pairs):
+                    shared_tok = f"___MD_CALLOUT_PAIR_{pair_idx}___"
+                    old_tok = f"___MD_CALLOUT_BLOCK_{i}___"
+                    new_tok = f"___MD_CALLOUT_BLOCK_{j}___"
+                    old_masked_c = old_masked_c.replace(old_tok, shared_tok)
+                    new_masked_c = new_masked_c.replace(new_tok, shared_tok)
+
+                    oc = old_callouts[i]
+                    nc = new_callouts[j]
+                    diffed_str, p_la, p_ld, p_ca, p_cd = cls.diff_callout_pair(oc, nc, is_collab=is_collab, author_name=author_name)
+                    pair_diffs[shared_tok] = diffed_str
+                    callout_l_add += p_la
+                    callout_l_del += p_ld
+                    callout_c_add += p_ca
+                    callout_c_del += p_cd
+
+                for i, oc in enumerate(old_callouts):
+                    if i not in used_old:
+                        old_tok = f"___MD_CALLOUT_BLOCK_{i}___"
+                        formatted_del = cls.format_del(oc.raw_text.rstrip('\r\n'), is_collab=is_collab, author=author_name)
+                        suffix = "\n" if oc.raw_text.endswith("\n") else ""
+                        deleted_callouts[old_tok] = formatted_del + suffix
+                        d_cnt = len([l for l in oc.lines if cls.has_substantive_words(l)])
+                        if is_collab:
+                            callout_c_del += d_cnt
+                        else:
+                            callout_l_del += d_cnt
+
+                for j, nc in enumerate(new_callouts):
+                    if j not in used_new:
+                        new_tok = f"___MD_CALLOUT_BLOCK_{j}___"
+                        formatted_ins = cls.format_ins(nc.raw_text.rstrip('\r\n'), is_collab=is_collab, author=author_name)
+                        suffix = "\n" if nc.raw_text.endswith("\n") else ""
+                        added_callouts[new_tok] = formatted_ins + suffix
+                        a_cnt = len([l for l in nc.lines if cls.has_substantive_words(l)])
+                        if is_collab:
+                            callout_c_add += a_cnt
+                        else:
+                            callout_l_add += a_cnt
+
+                old_masked = old_masked_c
+                new_masked = new_masked_c
+
         token_pattern = re.compile(
-            r'___MD_TABLE_[A-Z0-9_]+___|___MD_FIGURE_[A-Z0-9_]+___|\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
+            r'___MD_CALLOUT_[A-Z0-9_]+___|___MD_TABLE_[A-Z0-9_]+___|___MD_FIGURE_[A-Z0-9_]+___|\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
             r'(?<!`)`{3}(?!`)(?:[^`\n]|`{1,2}(?!`))+`{3}(?!`)|(?<!`)`{2}(?!`)(?:[^`\n]|`(?!=`))+`{2}(?!`)|(?<!`)`[^`\n]+`(?!`)|'
             r'\s+|\w+|[^\w\s]',
             re.DOTALL | re.UNICODE
@@ -675,50 +851,89 @@ class DiffEngine:
         collab_add = 0
         collab_del = 0
 
+        def format_chunk(chunk: str, is_del: bool) -> str:
+            token_map = deleted_callouts if is_del else added_callouts
+            if not token_map:
+                if is_del:
+                    return cls.format_del(chunk, is_collab=is_collab, author=author_name) if cls.has_substantive_words(chunk) else chunk
+                else:
+                    return cls.format_ins(chunk, is_collab=is_collab, author=author_name) if cls.has_substantive_words(chunk) else chunk
+
+            tok_pattern = "|".join(re.escape(k) for k in token_map.keys())
+            sub_parts = re.split(f"({tok_pattern})", chunk)
+            out = []
+            for sp in sub_parts:
+                if sp in token_map:
+                    out.append(token_map[sp])
+                elif sp:
+                    if is_del:
+                        if cls.has_substantive_words(sp):
+                            out.append(cls.format_del(sp, is_collab=is_collab, author=author_name))
+                        else:
+                            out.append(sp)
+                    else:
+                        if cls.has_substantive_words(sp):
+                            out.append(cls.format_ins(sp, is_collab=is_collab, author=author_name))
+                        else:
+                            out.append(sp)
+            return "".join(out)
+
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
                 result_parts.append("".join(new_tokens[j1:j2]))
             elif tag == 'delete':
                 del_chunk = "".join(old_tokens[i1:i2])
-                if cls.has_substantive_words(del_chunk):
-                    if is_collab:
-                        collab_del += 1
-                        result_parts.append(cls.format_del(del_chunk, is_collab=True, author=author_name))
-                    else:
-                        local_del += 1
-                        result_parts.append(cls.format_del(del_chunk, is_collab=False, author="agent"))
+                has_del_callout = any(k in del_chunk for k in deleted_callouts)
+                if cls.has_substantive_words(del_chunk) or has_del_callout:
+                    if not has_del_callout:
+                        if is_collab:
+                            collab_del += 1
+                        else:
+                            local_del += 1
+                    result_parts.append(format_chunk(del_chunk, is_del=True))
             elif tag == 'insert':
                 add_chunk = "".join(new_tokens[j1:j2])
-                if cls.has_substantive_words(add_chunk):
-                    if is_collab:
-                        collab_add += 1
-                        result_parts.append(cls.format_ins(add_chunk, is_collab=True, author=author_name))
-                    else:
-                        local_add += 1
-                        result_parts.append(cls.format_ins(add_chunk, is_collab=False, author="agent"))
+                has_add_callout = any(k in add_chunk for k in added_callouts)
+                if cls.has_substantive_words(add_chunk) or has_add_callout:
+                    if not has_add_callout:
+                        if is_collab:
+                            collab_add += 1
+                        else:
+                            local_add += 1
+                    result_parts.append(format_chunk(add_chunk, is_del=False))
                 else:
                     result_parts.append(add_chunk)
             elif tag == 'replace':
                 del_chunk = "".join(old_tokens[i1:i2])
                 add_chunk = "".join(new_tokens[j1:j2])
-                if cls.has_substantive_words(del_chunk):
-                    if is_collab:
-                        collab_del += 1
-                        result_parts.append(cls.format_del(del_chunk, is_collab=True, author=author_name))
-                    else:
-                        local_del += 1
-                        result_parts.append(cls.format_del(del_chunk, is_collab=False, author="agent"))
-                if cls.has_substantive_words(add_chunk):
-                    if is_collab:
-                        collab_add += 1
-                        result_parts.append(cls.format_ins(add_chunk, is_collab=True, author=author_name))
-                    else:
-                        local_add += 1
-                        result_parts.append(cls.format_ins(add_chunk, is_collab=False, author="agent"))
+                has_del_callout = any(k in del_chunk for k in deleted_callouts)
+                has_add_callout = any(k in add_chunk for k in added_callouts)
+
+                if cls.has_substantive_words(del_chunk) or has_del_callout:
+                    if not has_del_callout:
+                        if is_collab:
+                            collab_del += 1
+                        else:
+                            local_del += 1
+                    result_parts.append(format_chunk(del_chunk, is_del=True))
+
+                if cls.has_substantive_words(add_chunk) or has_add_callout:
+                    if not has_add_callout:
+                        if is_collab:
+                            collab_add += 1
+                        else:
+                            local_add += 1
+                    result_parts.append(format_chunk(add_chunk, is_del=False))
                 else:
                     result_parts.append(add_chunk)
 
         diff_text = "".join(result_parts)
+        for p_tok, p_str in pair_diffs.items():
+            diff_text = diff_text.replace(p_tok, p_str)
+        for d_tok, d_str in deleted_callouts.items():
+            diff_text = diff_text.replace(d_tok, d_str)
+        for a_tok, a_str in added_callouts.items():
+            diff_text = diff_text.replace(a_tok, a_str)
         for t_tok, t_str in new_tables.items():
             diff_text = diff_text.replace(t_tok, t_str)
         for f_tok, f_str in new_figures.items():
@@ -728,6 +943,12 @@ class DiffEngine:
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
+
+        local_add += callout_l_add
+        local_del += callout_l_del
+        collab_add += callout_c_add
+        collab_del += callout_c_del
+
         return clean_lines, local_add, local_del, collab_add, collab_del
 
     @classmethod

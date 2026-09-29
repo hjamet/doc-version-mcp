@@ -1393,6 +1393,81 @@ def test_artifact_builder_source_file_link(tmp_path):
     assert "📄 **Fichier Source**" not in virtual_art
 
 
+def test_diff_engine_deleted_callout_multiline_encapsulation():
+    """
+    Valide que lorsqu'un callout Markdown multiligne est supprimé,
+    l'intégralité de ses lignes (y compris la première ligne > [!TYPE])
+    est encapsulée dans le span rouge de suppression sans laisser de header orphelin.
+    """
+    old_text = (
+        "## Configuration\n\n"
+        "> [!NOTE]\n"
+        "> **Historical Screenshot Clarification**: Some screenshot captures in this documentation\n"
+        "> may display older foundation models from previous curriculum iterations.\n"
+        "> All nodes should use Groq llama-3.3-70b-versatile.\n\n"
+        "Paragraph after callout.\n"
+    )
+    new_text = (
+        "## Configuration\n\n"
+        "Paragraph after callout.\n"
+    )
+
+    annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
+        old_text=old_text,
+        new_text=new_text,
+        is_collab=False,
+        author_name="agent"
+    )
+
+    assert diff_count >= 1
+    # Vérifie que la ligne [!NOTE] est bien encapsulée dans le span rouge de suppression
+    assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">\[!NOTE\]</span>', annotated_body)
+    # Vérifie que les lignes de contenu sont également dans le span rouge
+    assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">\*\*Historical Screenshot Clarification\*\*', annotated_body)
+    assert "older foundation models" in annotated_body
+    # Vérifie qu'aucun callout actif non stylisé n'a été préservé par erreur en début de ligne
+    assert not re.search(r'^\s*>\s*\[!NOTE\]', annotated_body, re.MULTILINE)
+
+
+def test_diff_engine_deleted_callout_among_multiples():
+    """
+    Valide la suppression d'un callout situé entre d'autres callouts du même type,
+    en évitant le piège où difflib apparierait les headers génériques > [!NOTE].
+    """
+    old_text = (
+        "## Checkpoints\n\n"
+        "> [!NOTE]\n"
+        "> **Verification Checkpoint 1**: Check A.\n\n"
+        "> [!NOTE]\n"
+        "> **Verification Checkpoint 2**: Check B.\n\n"
+        "> [!NOTE]\n"
+        "> **Verification Checkpoint 3**: Check C.\n"
+    )
+    new_text = (
+        "## Checkpoints\n\n"
+        "> [!NOTE]\n"
+        "> **Verification Checkpoint 1**: Check A.\n\n"
+        "> [!NOTE]\n"
+        "> **Verification Checkpoint 3**: Check C.\n"
+    )
+
+    annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
+        old_text=old_text,
+        new_text=new_text,
+        is_collab=False,
+        author_name="agent"
+    )
+
+    # Checkpoint 1 et Checkpoint 3 doivent être intacts (non supprimés)
+    assert "> [!NOTE]\n> **Verification Checkpoint 1**: Check A." in annotated_body
+    assert "> [!NOTE]\n> **Verification Checkpoint 3**: Check C." in annotated_body
+
+    # Checkpoint 2 doit être entièrement balisé en suppression rouge
+    assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">\[!NOTE\]</span>', annotated_body)
+    assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">\*\*Verification Checkpoint 2\*\*: Check B\.</span>', annotated_body)
+
+
+
 
 
 
