@@ -364,9 +364,6 @@ class ArtifactBuilder:
             except Exception:
                 pass
 
-        # Dossier de destination (si l'image y existe déjà)
-        add_dir(brain_target_dir)
-
         # Dossier source et sous-dossiers immédiats
         if source_dir:
             s_res = source_dir.resolve()
@@ -429,31 +426,49 @@ class ArtifactBuilder:
 
             found_target: Optional[Path] = None
             p_abs = Path(clean_ref)
+            target_filename = p_abs.name
+
+            # Si clean_ref est un chemin absolu direct existant
+            # ATTENTION : Si p_abs pointe dans brain_target_dir, il s'agit d'une copie de session / cache de rendu.
+            # On ne l'accepte directement que s'il est en dehors de brain_target_dir afin de permettre le rafraîchissement
+            # depuis la source originale si celle-ci a été modifiée dans le vault ou projet.
             if p_abs.is_file():
-                found_target = p_abs
-            else:
-                target_filename = Path(clean_ref).name
-                # 1. Dossiers de recherche prioritaires
+                try:
+                    if p_abs.resolve().parent != brain_target_dir.resolve():
+                        found_target = p_abs
+                except Exception:
+                    pass
+
+            if not found_target:
+                is_abs_ref = False
+                try:
+                    is_abs_ref = Path(clean_ref).is_absolute()
+                except Exception:
+                    pass
+
+                # 1. Dossiers de recherche prioritaires (sources)
                 for b_dir in search_dirs:
                     if not b_dir.exists() or not b_dir.is_dir():
                         continue
-                    # Chemin direct relatif
-                    cand = b_dir / clean_ref
-                    if cand.is_file():
-                        found_target = cand
-                        break
+                    # Chemin direct relatif (uniquement si non absolu)
+                    if not is_abs_ref:
+                        cand = b_dir / clean_ref
+                        if cand.is_file():
+                            found_target = cand
+                            break
                     # Nom de fichier seul
                     cand_name = b_dir / target_filename
                     if cand_name.is_file():
                         found_target = cand_name
                         break
                     # Essai avec extensions si pas d'extension
-                    if not Path(clean_ref).suffix:
+                    if not Path(target_filename).suffix:
                         for ext in check_exts:
-                            cand_ext = b_dir / f"{clean_ref}{ext}"
-                            if cand_ext.is_file():
-                                found_target = cand_ext
-                                break
+                            if not is_abs_ref:
+                                cand_ext = b_dir / f"{clean_ref}{ext}"
+                                if cand_ext.is_file():
+                                    found_target = cand_ext
+                                    break
                             cand_ext_name = b_dir / f"{target_filename}{ext}"
                             if cand_ext_name.is_file():
                                 found_target = cand_ext_name
@@ -478,6 +493,18 @@ class ArtifactBuilder:
                         if found_target:
                             break
 
+                # 3. Fallback ultime de secours : si l'image n'est trouvée nulle part dans les sources réelles,
+                # mais qu'elle pré-existe déjà dans brain_target_dir (ex: asset généré localement en session)
+                if not found_target and brain_target_dir.is_dir():
+                    if not is_abs_ref:
+                        cand_brain = brain_target_dir / clean_ref
+                        if cand_brain.is_file():
+                            found_target = cand_brain
+                    if not found_target:
+                        cand_brain_name = brain_target_dir / target_filename
+                        if cand_brain_name.is_file():
+                            found_target = cand_brain_name
+
             # Rastérisation PyMuPDF si PDF
             if found_target and found_target.suffix.lower() == ".pdf":
                 try:
@@ -494,13 +521,14 @@ class ArtifactBuilder:
                 except Exception as e:
                     logger.warning("Erreur lors de la conversion PDF -> PNG pour '%s': %s", found_target, e)
 
-            # Copie physique vers brain_target_dir
+            # Copie physique inconditionnelle vers brain_target_dir (écrase systématiquement la destination si différente de la source)
             if found_target and found_target.is_file():
                 safe_name = found_target.name.replace(" ", "_")
                 dest_file = brain_target_dir / safe_name
                 try:
                     if found_target.resolve() != dest_file.resolve():
                         shutil.copy2(found_target, dest_file)
+                        logger.info("Copie/écrasement inconditionnel de l'image '%s' vers '%s'", found_target, dest_file)
                 except Exception as e:
                     logger.warning("Erreur lors de la copie physique de '%s' vers '%s': %s", found_target, dest_file, e)
 
@@ -521,8 +549,8 @@ class ArtifactBuilder:
             safe_name = Path(clean_ref).name.replace(" ", "_")
             return safe_name, None
 
-        # Copie éventuelle des images référencées dans le frontmatter YAML : Image: "[[...]]"
-        for m in re.finditer(r'Image:\s*"\[\[(.*?)\]\]"', markdown_text):
+        # Copie éventuelle des images référencées dans le frontmatter YAML : Image: "[[...]]" ou image: "[[...]]"
+        for m in re.finditer(r'(?:[Ii]mage|cover):\s*"\[\[(.*?)\]\]"', markdown_text):
             raw_img = m.group(1).split('|')[0].strip()
             locate_and_copy_image(raw_img)
 

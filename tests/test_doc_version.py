@@ -637,6 +637,59 @@ def test_diff_annotated_image_span_resolution(tmp_path):
     assert (brain_dir / "new_logo.png").read_bytes() == new_img.read_bytes()
 
 
+def test_image_overwrite_when_source_updated(tmp_path):
+    """
+    Valide que lorsqu'une image source est mise à jour (nouvelle capture, modification),
+    le MCP écrase inconditionnellement la version pré-existante dans brain_dir,
+    que la référence soit un wikilink ou une URL file:/// déjà formatée.
+    """
+    vault_dir = tmp_path / "Vault"
+    vault_dir.mkdir()
+    (vault_dir / ".obsidian").mkdir()
+
+    ateliers_dir = vault_dir / "_attachments" / "ateliers"
+    ateliers_dir.mkdir(parents=True)
+    img_file = ateliers_dir / "lab2_img_17.png"
+    img_file.write_bytes(b"VERSION_1_INITIAL_BYTES")
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+
+    # 1. Premier formatage : copie initiale
+    md_input = "Capture de l'atelier : ![[lab2_img_17.png|Figure 17]]"
+    formatted_v1 = ArtifactBuilder.format_images_for_brain(
+        markdown_text=md_input,
+        brain_target_dir=brain_dir,
+        source_dir=vault_dir
+    )
+
+    copied_img = brain_dir / "lab2_img_17.png"
+    assert copied_img.is_file()
+    assert copied_img.read_bytes() == b"VERSION_1_INITIAL_BYTES"
+
+    # 2. Mise à jour de l'image source sur le disque (nouvelle capture par Henri)
+    img_file.write_bytes(b"VERSION_2_UPDATED_BYTES_AFTER_NEW_CAPTURE")
+
+    # 3. Deuxième formatage : doit obligatoirement écraser l'ancienne version dans brain_dir
+    formatted_v2 = ArtifactBuilder.format_images_for_brain(
+        markdown_text=md_input,
+        brain_target_dir=brain_dir,
+        source_dir=vault_dir
+    )
+
+    assert copied_img.read_bytes() == b"VERSION_2_UPDATED_BYTES_AFTER_NEW_CAPTURE"
+
+    # 4. Troisième formatage avec un texte contenant déjà le lien file:/// vers brain_dir
+    img_file.write_bytes(b"VERSION_3_THIRD_CAPTURE")
+    formatted_v3 = ArtifactBuilder.format_images_for_brain(
+        markdown_text=formatted_v2,
+        brain_target_dir=brain_dir,
+        source_dir=vault_dir
+    )
+
+    assert copied_img.read_bytes() == b"VERSION_3_THIRD_CAPTURE"
+
+
 def test_latex_convert_figures_markdown_standard(tmp_path):
     """Valide que les figures LaTeX sont converties en Markdown standard et non en wikilinks."""
     tex_snippet = r"""
