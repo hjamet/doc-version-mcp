@@ -518,7 +518,8 @@ def test_image_copying_and_formatting_in_brain(tmp_path):
     assert "![[" not in formatted
     # 3. Le texte doit pointer en file:/// vers brain_dir
     b_posix = brain_dir.resolve().as_posix().lstrip('/')
-    assert f"file:///{b_posix}/unil_logo.png" in formatted
+    import re
+    assert re.search(rf"file:///{re.escape(b_posix)}/unil_logo_[0-9a-f]{{8}}\.png", formatted)
 
 
 def test_obsidian_vault_image_resolution_and_physical_copy(tmp_path, caplog):
@@ -594,9 +595,10 @@ Voici une image inexistante : ![[image_introuvable.png]]
 
     # 3. Vérification des liens dans le texte formaté
     b_posix = brain_dir.resolve().as_posix().lstrip('/')
-    assert f"file:///{b_posix}/lab2_img_17.png" in formatted
-    assert f"file:///{b_posix}/vault_diagram.png" in formatted
-    assert f"file:///{b_posix}/latent_space_map.png" in formatted
+    import re
+    assert re.search(rf"file:///{re.escape(b_posix)}/lab2_img_17_[0-9a-f]{{8}}\.png", formatted)
+    assert re.search(rf"file:///{re.escape(b_posix)}/vault_diagram_[0-9a-f]{{8}}\.png", formatted)
+    assert re.search(rf"file:///{re.escape(b_posix)}/latent_space_map_[0-9a-f]{{8}}\.png", formatted)
 
     # Pour l'image inexistante, le lien file:/// ne doit JAMAIS être inséré (évite Preview unavailable)
     assert f"file:///{b_posix}/image_introuvable.png" not in formatted
@@ -678,6 +680,7 @@ def test_image_overwrite_when_source_updated(tmp_path):
     )
 
     assert copied_img.read_bytes() == b"VERSION_2_UPDATED_BYTES_AFTER_NEW_CAPTURE"
+    assert formatted_v1 != formatted_v2, "L'URL de l'image formatée doit changer lors de la mise à jour pour bust le cache webview"
 
     # 4. Troisième formatage avec un texte contenant déjà le lien file:/// vers brain_dir
     img_file.write_bytes(b"VERSION_3_THIRD_CAPTURE")
@@ -688,6 +691,7 @@ def test_image_overwrite_when_source_updated(tmp_path):
     )
 
     assert copied_img.read_bytes() == b"VERSION_3_THIRD_CAPTURE"
+    assert formatted_v2 != formatted_v3, "L'URL de l'image formatée doit changer lors du 3e tour pour bust le cache webview"
 
 
 def test_latex_convert_figures_markdown_standard(tmp_path):

@@ -5,6 +5,7 @@ artifact_builder.py — Assemblage normé d'artéfacts Markdown Antigravity avec
 import re
 import os
 import shutil
+import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
@@ -427,6 +428,8 @@ class ArtifactBuilder:
             found_target: Optional[Path] = None
             p_abs = Path(clean_ref)
             target_filename = p_abs.name
+            stem_unversioned = re.sub(r'_(?:[0-9a-fA-F]{8}|\d{10})$', '', p_abs.stem)
+            unversioned_filename = f"{stem_unversioned}{p_abs.suffix}"
 
             # Si clean_ref est un chemin absolu direct existant
             # ATTENTION : Si p_abs pointe dans brain_target_dir, il s'agit d'une copie de session / cache de rendu.
@@ -446,6 +449,10 @@ class ArtifactBuilder:
                 except Exception:
                     pass
 
+                candidate_names = [target_filename]
+                if unversioned_filename != target_filename:
+                    candidate_names.append(unversioned_filename)
+
                 # 1. Dossiers de recherche prioritaires (sources)
                 for b_dir in search_dirs:
                     if not b_dir.exists() or not b_dir.is_dir():
@@ -456,32 +463,41 @@ class ArtifactBuilder:
                         if cand.is_file():
                             found_target = cand
                             break
-                    # Nom de fichier seul
-                    cand_name = b_dir / target_filename
-                    if cand_name.is_file():
-                        found_target = cand_name
+                        if unversioned_filename != target_filename:
+                            cand_unv = b_dir / unversioned_filename
+                            if cand_unv.is_file():
+                                found_target = cand_unv
+                                break
+                    # Noms de fichiers (avec et sans hash)
+                    for cand_n in candidate_names:
+                        cand_file = b_dir / cand_n
+                        if cand_file.is_file():
+                            found_target = cand_file
+                            break
+                    if found_target:
                         break
+
                     # Essai avec extensions si pas d'extension
                     if not Path(target_filename).suffix:
                         for ext in check_exts:
-                            if not is_abs_ref:
-                                cand_ext = b_dir / f"{clean_ref}{ext}"
-                                if cand_ext.is_file():
-                                    found_target = cand_ext
+                            for cand_n in candidate_names:
+                                cand_ext_name = b_dir / f"{cand_n}{ext}"
+                                if cand_ext_name.is_file():
+                                    found_target = cand_ext_name
                                     break
-                            cand_ext_name = b_dir / f"{target_filename}{ext}"
-                            if cand_ext_name.is_file():
-                                found_target = cand_ext_name
+                            if found_target:
                                 break
-                        if found_target:
-                            break
+                    if found_target:
+                        break
 
                 # 2. Recherche récursive dans vault_root ou source_dir
                 if not found_target and (vault_root or source_dir):
                     search_root = vault_root or source_dir
-                    names_to_try = [target_filename]
+                    names_to_try = list(candidate_names)
                     if not Path(clean_ref).suffix:
-                        names_to_try.extend([f"{target_filename}{ext}" for ext in check_exts])
+                        for ext in check_exts:
+                            for cand_n in candidate_names:
+                                names_to_try.append(f"{cand_n}{ext}")
                     for n in names_to_try:
                         for root, dirs, files in os.walk(search_root):
                             dirs[:] = [d for d in dirs if d not in {".git", ".obsidian", ".venv", "node_modules", ".trash", "$RECYCLE.BIN"}]
@@ -501,9 +517,11 @@ class ArtifactBuilder:
                         if cand_brain.is_file():
                             found_target = cand_brain
                     if not found_target:
-                        cand_brain_name = brain_target_dir / target_filename
-                        if cand_brain_name.is_file():
-                            found_target = cand_brain_name
+                        for cand_n in candidate_names:
+                            cand_brain_name = brain_target_dir / cand_n
+                            if cand_brain_name.is_file():
+                                found_target = cand_brain_name
+                                break
 
             # Rastérisation PyMuPDF si PDF
             if found_target and found_target.suffix.lower() == ".pdf":
@@ -513,27 +531,68 @@ class ArtifactBuilder:
                     if len(doc) > 0:
                         page = doc[0]
                         pix = page.get_pixmap(dpi=300)
-                        raster_name = f"{found_target.stem}.png".replace(" ", "_")
+                        clean_stem = re.sub(r'_(?:[0-9a-fA-F]{8}|\d{10})$', '', found_target.stem).replace(" ", "_")
+                        pdf_hash = hashlib.md5(found_target.read_bytes()).hexdigest()[:8]
+                        raster_name = f"{clean_stem}_{pdf_hash}.png"
+                        canonical_raster = f"{clean_stem}.png"
                         raster_png = brain_target_dir / raster_name
                         pix.save(str(raster_png))
+                        pix.save(str(brain_target_dir / canonical_raster))
+                        # Nettoyage des anciennes versions hashées obsolètes du même stem
+                        for old_f in brain_target_dir.glob(f"{clean_stem}_*.png"):
+                            if old_f.name != raster_name and re.match(rf"^{re.escape(clean_stem)}_[0-9a-fA-F]{{8}}\.png$", old_f.name):
+                                try:
+                                    old_f.unlink()
+                                except Exception:
+                                    pass
                         if raster_png.is_file():
                             return raster_name, f"file:///{b_posix}/{raster_name}"
                 except Exception as e:
                     logger.warning("Erreur lors de la conversion PDF -> PNG pour '%s': %s", found_target, e)
 
-            # Copie physique inconditionnelle vers brain_target_dir (écrase systématiquement la destination si différente de la source)
+            # Copie physique vers brain_target_dir avec nom versionné par hash (cache-busting garanti pour le webview Chromium d'Antigravity)
             if found_target and found_target.is_file():
-                safe_name = found_target.name.replace(" ", "_")
-                dest_file = brain_target_dir / safe_name
+                img_bytes = found_target.read_bytes()
+                img_hash = hashlib.md5(img_bytes).hexdigest()[:8]
+                clean_stem = re.sub(r'_(?:[0-9a-fA-F]{8}|\d{10})$', '', found_target.stem).replace(" ", "_")
+                ext = found_target.suffix.lower()
+                versioned_name = f"{clean_stem}_{img_hash}{ext}"
+                canonical_name = f"{clean_stem}{ext}"
+
+                dest_file = brain_target_dir / versioned_name
+                canonical_dest = brain_target_dir / canonical_name
                 try:
                     if found_target.resolve() != dest_file.resolve():
-                        shutil.copy2(found_target, dest_file)
-                        logger.info("Copie/écrasement inconditionnel de l'image '%s' vers '%s'", found_target, dest_file)
+                        dest_file.write_bytes(img_bytes)
+                        try:
+                            shutil.copystat(found_target, dest_file)
+                        except Exception:
+                            pass
+                        logger.info("Copie/écrasement versionné de l'image '%s' vers '%s'", found_target, dest_file)
+
+                    # Maintien de la copie canonique sans hash pour rétro-compatibilité
+                    if found_target.resolve() != canonical_dest.resolve():
+                        canonical_dest.write_bytes(img_bytes)
+                        try:
+                            shutil.copystat(found_target, canonical_dest)
+                        except Exception:
+                            pass
+
+                    # Purge des anciennes versions hashées du même stem dans brain_target_dir
+                    for old_f in brain_target_dir.glob(f"{clean_stem}_*{ext}"):
+                        if old_f.name != versioned_name and re.match(rf"^{re.escape(clean_stem)}_[0-9a-fA-F]{{8}}\.{re.escape(ext.lstrip('.'))}$", old_f.name):
+                            try:
+                                old_f.unlink()
+                                logger.info("Purge de l'ancienne version image obsolète '%s'", old_f)
+                            except Exception:
+                                pass
                 except Exception as e:
                     logger.warning("Erreur lors de la copie physique de '%s' vers '%s': %s", found_target, dest_file, e)
 
                 if dest_file.is_file():
-                    return safe_name, f"file:///{b_posix}/{safe_name}"
+                    return versioned_name, f"file:///{b_posix}/{versioned_name}"
+                elif canonical_dest.is_file():
+                    return canonical_name, f"file:///{b_posix}/{canonical_name}"
                 else:
                     logger.warning("Fichier image copié non trouvé sur le disque : '%s'", dest_file)
 
@@ -560,6 +619,7 @@ class ArtifactBuilder:
             raw_path = parts[0].strip()
             safe_name, file_url = locate_and_copy_image(raw_path)
             alt = parts[1].strip() if len(parts) > 1 and not parts[1].strip().isdigit() else Path(safe_name).stem.replace('_', ' ')
+            alt = re.sub(r'_[0-9a-fA-F]{8}$', '', alt)
             if file_url:
                 return f"\n\n![{alt}]({file_url})\n\n"
             return f"\n\n![{alt}]({raw_path})\n\n"
@@ -569,6 +629,7 @@ class ArtifactBuilder:
             src = m.group(2).strip()
             safe_name, file_url = locate_and_copy_image(src)
             clean_alt = alt if (alt and not alt.isdigit()) else Path(safe_name).stem.replace('_', ' ')
+            clean_alt = re.sub(r'_[0-9a-fA-F]{8}$', '', clean_alt)
             if file_url:
                 return f"\n\n![{clean_alt}]({file_url})\n\n"
             return f"\n\n![{clean_alt}]({src})\n\n"
