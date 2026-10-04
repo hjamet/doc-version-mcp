@@ -345,3 +345,74 @@ def test_allowed_terms_bypass():
     assert len(res_pass.hard_blockers) == 0
 
 
+def test_french_ai_text_blocked():
+    """Valide qu'un texte IA français synthétique typique est bloqué (FAIL) par plusieurs Hard Blockers."""
+    ai_text = (
+        "Bien sûr ! Plongez au cœur de notre écosystème innovant où nous franchissons un tournant décisif. "
+        "Il est crucial de noter que cette solution transforme l'expérience utilisateur, illustrant ainsi notre engagement. "
+        "En conclusion, il convient de noter qu'une nouvelle ère s'ouvre et que l'avenir s'annonce prometteur."
+    )
+    res = check_style(ai_text, language="fr")
+    assert res.verdict == "FAIL"
+    assert res.passed is False
+    assert len(res.hard_blockers) >= 4
+    hb_terms = [h["term"].lower() for h in res.hard_blockers]
+    assert any("écosystème innovant" in t for t in hb_terms)
+    assert any("tournant décisif" in t for t in hb_terms)
+
+
+def test_french_human_phrases_not_blocked():
+    """Valide que les tournures humaines courantes ('il apparaît que', 'c'est essentiel') ne sont pas bloquées."""
+    phrase_1 = "Il apparaît que la méthode proposée garantit une convergence numérique optimale."
+    res_1 = check_style(phrase_1, language="fr")
+    assert res_1.verdict != "FAIL"
+    assert res_1.passed is True
+    assert len(res_1.hard_blockers) == 0
+
+    phrase_2 = "C'est essentiel pour assurer la stabilité du protocole de synchronisation."
+    res_2 = check_style(phrase_2, language="fr")
+    assert res_2.verdict != "FAIL"
+    assert res_2.passed is True
+    assert len(res_2.hard_blockers) == 0
+
+
+def test_french_collocations_blocked_vs_isolated_words():
+    """Valide que les collocations clichées sont bloquantes (P1) tandis que les mots isolés non répétés passent."""
+    # Collocation clichée -> FAIL
+    cliche_text = "Cette étape joue un rôle essentiel dans le processus de validation."
+    res_cliche = check_style(cliche_text, language="fr")
+    assert res_cliche.verdict == "FAIL"
+    assert any("rôle essentiel" in h["term"].lower() for h in res_cliche.hard_blockers)
+
+    # Mot isolé non répété -> PASS
+    isolated_text = "Cette étape est essentielle pour achever le processus de validation technique."
+    res_isolated = check_style(isolated_text, language="fr")
+    assert res_isolated.verdict != "FAIL"
+    assert res_isolated.passed is True
+    assert len(res_isolated.hard_blockers) == 0
+
+
+def test_unknown_language_raises_value_error():
+    """Valide qu'une langue non supportée lève une exception ValueError explicite."""
+    with pytest.raises(ValueError, match="non supportée"):
+        check_style("Texto en español para probar el rechazo explícito.", language="es")
+
+
+def test_short_text_auto_detect_raises_value_error():
+    """Valide qu'un texte trop court en mode auto lève une ValueError explicite au lieu de deviner silencieusement."""
+    with pytest.raises(ValueError, match="Texte trop court"):
+        check_style("Texte trop court.", language="auto")
+
+
+def test_french_auto_detect_long_text():
+    """Valide la détection automatique réussie sur un texte d'une longueur supérieure au seuil documenté."""
+    long_fr_text = (
+        "Voici une description technique détaillée et formelle des fonctionnalités logicielles développées "
+        "par notre équipe de recherche pour le laboratoire de télécommunications."
+    )
+    res = check_style(long_fr_text, language="auto")
+    assert res.detected_language == "fr"
+    assert res.language_source == "auto"
+
+
+

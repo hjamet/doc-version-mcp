@@ -250,7 +250,7 @@ def get_diff_artifact(
     mode: str = "paper",
     brain_dir: str = "",
     artifact_name: str = "",
-    language: str = "auto",
+    language: str = "en",
     allowed_terms: str = "",
     context_mode: str = "general",
     return_content: bool = False

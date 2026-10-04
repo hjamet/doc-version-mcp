@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Union
 
+try:
+    from .fr_ai_patterns import scan_french_ai_patterns
+except ImportError:
+    from fr_ai_patterns import scan_french_ai_patterns
+
+
 
 DEFAULT_DETECT_JS_PATHS = [
     Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
@@ -27,11 +33,15 @@ DEFAULT_VALIDATE_JS_PATHS = [
 ]
 
 
-# Stop-words pour la détection automatique de la langue
+# Seuil minimal documenté de mots pour autoriser la détection automatique de langue
+MIN_AUTO_DETECT_WORDS = 15
+
+
+# Stop-words pour la détection automatique de la langue (sans homographes anglais comme 'or' et 'car')
 FR_STOPWORDS = {
     "le", "la", "les", "de", "des", "du", "un", "une", "et", "en", "dans", "pour",
     "qui", "que", "est", "sont", "avec", "sur", "ce", "cette", "ces", "mais", "ou",
-    "donc", "or", "ni", "car", "nous", "vous", "ils", "elles", "leur", "comme", "aussi",
+    "donc", "ni", "nous", "vous", "ils", "elles", "leur", "comme", "aussi",
     "plus", "par", "au", "aux", "d'un", "d'une", "l'un", "l'une", "qu'il", "qu'elle"
 }
 
@@ -162,7 +172,12 @@ class StyleCheckResult:
     stylometric_warnings: List[Dict[str, Any]] = field(default_factory=list)
     error_report: str = ""
     detected_language: str = "en"
+    language_source: str = "auto"
 
+    @property
+    def passed(self) -> bool:
+        """Retourne True si le document est conforme (PASS ou WARN), False en cas de FAIL."""
+        return self.verdict in ("PASS", "WARN")
 
     def to_iteration_dict(self, iteration: int = 1) -> Dict[str, Any]:
         """Convertit le résultat en dictionnaire d'itération structuré pour le suivi."""
@@ -485,7 +500,7 @@ def run_node_detector(file_path: Path, context_mode: str = "technical") -> Dict[
 
 def check_style(
     text: str,
-    language: str = "auto",
+    language: str = "en",
     context_mode: str = "technical",
     allowed_terms: Optional[Union[List[str], set]] = None
 ) -> StyleCheckResult:
@@ -493,7 +508,9 @@ def check_style(
     Point d'entrée principal du Style Guard.
     Évalue le document, applique la classification stricte des alertes et le budget gradué.
     Supporte les exemptions explicites arbitrées par l'auteur (allowed_terms ou DOC_VERSION_ALLOWED_TERMS).
+    Rétrocompatibilité : Les appels sans paramètre 'language' s'exécutent en anglais ('en').
     """
+    text = text.lstrip("\ufeff")
     if not text or not text.strip():
         return StyleCheckResult(
             verdict="PASS",
@@ -528,12 +545,29 @@ def check_style(
             if t.strip():
                 allowed_set.add(t.strip().lower())
 
+    # Résolution de la langue (défaut 'en', 'fr' explicite, ou 'auto' avec contrôle Fail-Fast sur texte court)
+    clean_lang = (language or "en").strip().lower()
+    if clean_lang not in ("fr", "en", "auto"):
+        raise ValueError(
+            f"Langue '{language}' non supportée par Style Guard. "
+            "Valeurs acceptées : 'fr', 'en', ou 'auto'."
+        )
 
-    # Résolution de la langue
-    detected_lang = detect_language(text)
-    effective_lang = detected_lang if language == "auto" else language.lower()
-    if effective_lang not in ("en", "fr"):
-        effective_lang = "en"
+    if clean_lang == "auto":
+        # Contrôle Fail-Fast sur texte trop court pour détecter la langue de manière fiable
+        words_for_lang = re.findall(r"\b\w+\b", text)
+        if len(words_for_lang) < MIN_AUTO_DETECT_WORDS:
+            raise ValueError(
+                f"Texte trop court ({len(words_for_lang)} mots < {MIN_AUTO_DETECT_WORDS} mots) "
+                "pour détecter automatiquement la langue avec certitude. "
+                "Veuillez spécifier le paramètre 'language' explicitement ('fr' ou 'en')."
+            )
+        detected_lang = detect_language(text)
+        effective_lang = detected_lang
+        lang_source = "auto"
+    else:
+        effective_lang = clean_lang
+        lang_source = "explicit"
 
     # Calcul du nombre de mots
     word_count = len(re.findall(r"\b\w+\b", text))
@@ -561,6 +595,12 @@ def check_style(
     hard_blockers = scan_deterministic_hard_blockers(text_for_audit, language=effective_lang, allowed_terms=allowed_set)
     soft_warnings = []
     stylometric_warnings = []
+
+    # 1b. Si langue française : application des règles déterministes transposées de SKILL-FR.md
+    if effective_lang == "fr":
+        fr_hb, fr_sw = scan_french_ai_patterns(text_for_audit, allowed_terms=allowed_set)
+        hard_blockers.extend(fr_hb)
+        soft_warnings.extend(fr_sw)
 
 
     # 2. Exécution du moteur detect.js
@@ -672,9 +712,10 @@ def check_style(
     # Construction du rapport d'erreur en cas de FAIL
     error_report = ""
     if verdict == "FAIL":
+        lang_label = f"{effective_lang.upper()} ({'détection automatique' if lang_source == 'auto' else 'explicite'})"
         report_lines = [
             f"[AVOID-AI-WRITING] Style Guard Bloquant (Verdict: FAIL)",
-            f"Document : {word_count} mots | Langue : {effective_lang.upper()} | Budget Soft Warnings autorisé : {budget_max}",
+            f"Document : {word_count} mots | Langue : {lang_label} | Budget Soft Warnings autorisé : {budget_max}",
             f"Hard Blockers (Tolérance 0) : {len(hard_blockers)} | Soft Warnings : {len(soft_warnings)} (Budget max : {budget_max})"
         ]
 
@@ -699,7 +740,8 @@ def check_style(
         soft_warnings=soft_warnings,
         stylometric_warnings=stylometric_warnings,
         error_report=error_report,
-        detected_language=effective_lang
+        detected_language=effective_lang,
+        language_source=lang_source
     )
 
 
