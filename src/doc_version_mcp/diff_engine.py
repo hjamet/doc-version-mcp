@@ -723,7 +723,14 @@ class DiffEngine:
             total_words = mots_ancien + mots_nouveau
             taux = (mots_supp + mots_ajoutes) / total_words if total_words > 0 else 0.0
 
-            if taux > threshold:
+            tok_re = re.compile(r'\s+|\w+|[^\w\s]', re.DOTALL | re.UNICODE)
+            t_o = tok_re.findall(tb)
+            t_n = tok_re.findall(ta)
+            sm = difflib.SequenceMatcher(None, t_o, t_n, autojunk=False)
+            mod_segments = [op for op in sm.get_opcodes() if op[0] in ('delete', 'insert', 'replace')]
+            change_rate = 1.0 - sm.ratio()
+
+            if taux > threshold or change_rate > threshold or len(mod_segments) > 6:
                 collab = is_collab or bool(re.search(r'#(?:ffedd5|dbeafe)', p))
                 author = author_name
                 m_author = re.search(r'data-author="([^"]+)"', p)
@@ -790,6 +797,8 @@ class DiffEngine:
             return 'math'
         if u.startswith('|') and '|' in u[1:]:
             return 'table'
+        if re.match(r'^\s*!\[.*?\]\(.*?\)\s*$', u) or re.match(r'^\s*!\[\[.*?\]\]\s*$', u):
+            return 'image'
         if re.match(r'^>\s*\[![A-Z]+\]', u):
             return 'callout'
         if u.startswith('>'):
@@ -825,7 +834,7 @@ class DiffEngine:
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
                         if ratio >= 0.35:
                             sim = 1.0 + ratio
-                    elif t_old in ('quote', 'paragraph', 'callout'):
+                    elif t_old in ('quote', 'paragraph', 'callout', 'image'):
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
                         if ratio >= 0.20:
                             sim = ratio
@@ -970,6 +979,15 @@ class DiffEngine:
         t_old = cls.get_unit_type(u_old)
         t_new = cls.get_unit_type(u_new)
 
+        if t_old == 'image' and t_new == 'image':
+            clean_img = u_new.strip()
+            clean_img = re.sub(
+                r'!\[(.*?)\]\((.*?)\)',
+                lambda m: f"![{re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))}]({m.group(2)})",
+                clean_img
+            )
+            return clean_img, 0, 0, 0, 0
+
         if t_old == 'math' and t_new == 'math':
             l_add = 0 if is_collab else 1
             l_del = 0 if is_collab else 1
@@ -982,16 +1000,25 @@ class DiffEngine:
         w_old = re.findall(r'\b\w+\b', clean_old)
         w_new = re.findall(r'\b\w+\b', clean_new)
 
-        tok_re = re.compile(r'\s+|\w+|[^\w\s]', re.DOTALL | re.UNICODE)
+        tok_re = re.compile(
+            r'\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
+            r'(?<!`)`{3}(?!`)(?:[^`\n]|`{1,2}(?!`))+`{3}(?!`)|(?<!`)`{2}(?!`)(?:[^`\n]|`(?!=`))+`{2}(?!`)|(?<!`)`[^`\n]+`(?!`)|'
+            r'\s+|\w+|[^\w\s]',
+            re.DOTALL | re.UNICODE
+        )
         t_o = tok_re.findall(clean_old)
         t_n = tok_re.findall(clean_new)
         m = difflib.SequenceMatcher(None, t_o, t_n, autojunk=False)
-        del_w = sum(len(re.findall(r'\b\w+\b', "".join(t_o[i1:i2]))) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag in ('delete', 'replace'))
-        ins_w = sum(len(re.findall(r'\b\w+\b', "".join(t_n[j1:j2]))) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag in ('insert', 'replace'))
+        opcodes = m.get_opcodes()
+        mod_segments = [op for op in opcodes if op[0] in ('delete', 'insert', 'replace')]
+        change_rate = 1.0 - m.ratio()
+
+        del_w = sum(len(re.findall(r'\b\w+\b', "".join(t_o[i1:i2]))) for tag, i1, i2, j1, j2 in opcodes if tag in ('delete', 'replace'))
+        ins_w = sum(len(re.findall(r'\b\w+\b', "".join(t_n[j1:j2]))) for tag, i1, i2, j1, j2 in opcodes if tag in ('insert', 'replace'))
         total_w = len(w_old) + len(w_new)
         rate = (del_w + ins_w) / total_w if total_w > 0 else 0.0
 
-        if rate > threshold:
+        if change_rate > threshold or rate > threshold or len(mod_segments) > 6:
             del_b = cls.format_del(u_old, is_collab=is_collab, author=author_name)
             ins_b = cls.format_ins(u_new, is_collab=is_collab, author=author_name)
             l_del = 0 if is_collab else len([l for l in u_old.splitlines() if cls.has_substantive_words(l)])
@@ -1073,6 +1100,11 @@ class DiffEngine:
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
+        diff_text = re.sub(
+            r'!\[(.*?)\]\((.*?)\)',
+            lambda m: f"![{re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))}]({m.group(2)})",
+            diff_text
+        )
 
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)

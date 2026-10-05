@@ -316,3 +316,61 @@ def test_diff_zero_spans_with_newline_complex_section():
     spans_with_nl = re.findall(r'<span\b[^>]*>[^<]*\n[^<]*</span>', annotated)
     assert len(spans_with_nl) == 0
 
+
+def test_diff_block_mode_on_high_segment_count():
+    """
+    Vérifie qu'un paragraphe ayant plus de 6 segments modifiés bascule en mode bloc
+    même si son taux de modification de mots (1 - ratio) est inférieur à 0.50.
+    """
+    old_p = "The quick brown fox jumps over the lazy dog and runs across seven hills, five valleys, and three rivers."
+    # Alter multiple small words distributed across the sentence to create > 6 edit segments while keeping ratio high
+    new_p = "A quick red fox leaps over that lazy hound and walks across seven green hills, four valleys, and two rivers."
+
+    old_doc = f"## Section\n\n{old_p}\n"
+    new_doc = f"## Section\n\n{new_p}\n"
+
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+    # En mode bloc, tout old_p est dans un span rouge et tout new_p est dans un span vert
+    assert f">{old_p}</span>" in annotated or old_p in annotated
+    # Il ne doit pas y avoir de word-diff fragmenté avec de multiples spans ins/del entrelacés
+    del_spans = re.findall(r'<span\b[^>]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', annotated)
+    ins_spans = re.findall(r'<span\b[^>]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', annotated)
+    assert len(del_spans) == 1
+    assert len(ins_spans) == 1
+
+
+def test_diff_image_alt_text_clean_no_spans():
+    """
+    Vérifie que les lignes d'images Markdown ne contiennent aucun span HTML dans leur texte alternatif.
+    """
+    old_doc = "## Section\n\n![Old diagram of the hybrid pipeline](fig/pipeline.png)\n"
+    new_doc = "## Section\n\n![New diagram of the hybrid architecture with feedback](fig/pipeline.png)\n"
+
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+    img_lines = [l for l in annotated.splitlines() if l.startswith('![')]
+    assert len(img_lines) == 1
+    assert "<span" not in img_lines[0]
+    assert img_lines[0] == "![New diagram of the hybrid architecture with feedback](fig/pipeline.png)"
+
+
+def test_artifact_builder_utc_timestamp_conversion():
+    """
+    Vérifie que les timestamps timezone-aware (+02:00 CEST) sont correctement convertis en UTC.
+    """
+    from datetime import datetime, timezone
+    from doc_version_mcp.artifact_builder import ArtifactBuilder
+
+    commits = [
+        {
+            "commit_id": "abcdef123456",
+            "timestamp": "2026-10-05T12:03:26+02:00",
+            "author": "Henri Jamet",
+            "message": "Test commit",
+        }
+    ]
+    table = ArtifactBuilder.build_recent_commits_table(commits, limit=1)
+    # Doit afficher 10:03:26 UTC et non 12:03:26 UTC
+    assert "2026-10-05 10:03:26 UTC" in table
+    assert "12:03:26" not in table
+
+

@@ -122,6 +122,8 @@ class ArtifactBuilder:
             if raw_ts:
                 try:
                     dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    if dt.tzinfo is not None:
+                        dt = dt.astimezone(timezone.utc)
                     formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
                 except Exception:
                     formatted_date = raw_ts[:19].replace("T", " ")
