@@ -253,7 +253,8 @@ def get_diff_artifact(
     language: str = "en",
     allowed_terms: str = "",
     context_mode: str = "general",
-    return_content: bool = False
+    return_content: bool = False,
+    block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD
 ) -> str:
 
     """
@@ -291,7 +292,15 @@ def get_diff_artifact(
 
         # 1. Résolution de new_text
         if to_commit_id:
-            new_text = cas.restore_snapshot(to_commit_id)
+            try:
+                new_text = cas.restore_snapshot(to_commit_id)
+            except (FileNotFoundError, ValueError):
+                if is_git and repo_root and rel_git_path:
+                    git_new = get_git_file_content(repo_root, rel_git_path, to_commit_id)
+                    if git_new is not None:
+                        new_text = git_new
+                if not new_text:
+                    raise FileNotFoundError(f"Commit introuvable dans CAS et Git : {to_commit_id}")
         elif content:
             new_text = content
         elif disk_content is not None:
@@ -474,7 +483,8 @@ def get_diff_artifact(
             old_text=old_text,
             new_text=new_text,
             is_collab=False,
-            author_name="agent"
+            author_name="agent",
+            block_diff_threshold=block_diff_threshold
         )
 
         # Récupération des 5 derniers commits depuis le CAS (incluant les commits Git synchronisés)

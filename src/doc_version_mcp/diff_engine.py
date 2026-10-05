@@ -46,6 +46,9 @@ class DiffEngine:
     DEL_STYLE_COLLAB = 'style="background-color: #ffedd5; color: #9a3412; padding: 2px 4px; border-radius: 3px;"'
     INS_STYLE_COLLAB = 'style="background-color: #dbeafe; color: #1e40af; padding: 2px 4px; border-radius: 3px;"'
 
+    PARAGRAPH_BLOCK_DIFF_THRESHOLD: float = 0.5
+    """Seuil de taux de modification au-delà duquel un paragraphe est rendu en bloc plutôt que mot à mot (défaut: 0.5 = 50%)."""
+
     SECTION_ALIASES = {
         'the llm network game': 'the latent space',
         'game overview and setup': 'game overview and components',
@@ -184,7 +187,11 @@ class DiffEngine:
         text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|raggedleft|raggedright)\b', '', text)
         text = re.sub(r'\\needspace(?:\{[^{}]*\}|\[[^\]]*\])?', '', text)
         text = re.sub(r'\\(?:vspace|hspace|setlength|addtolength)\*?\{[^}]*\}(?:\{[^}]*\})?', '', text)
-        text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace|cmidrule(?:\[[^\]]*\])?\{[^}]*\})', '', text)
+        text = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', text)
+        text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace)\b', '', text)
+        text = re.sub(r'\\keywords\s*\{.*?\}', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\and\b', ' • ', text)
+        text = re.sub(r'\\(?:Statex|State|Require|Ensure|EndFor|EndIf|EndWhile)\b', '', text)
         text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
 
         # Règles, boîtes, couleurs et dimensions
@@ -246,10 +253,10 @@ class DiffEngine:
         for _ in range(3):
             text = re.sub(r'(?<![\\\$a-zA-Z0-9_])\{([^{}]*)\}', r'\1', text)
 
-        # Nettoyage des accolades fermantes orphelines
+        # Nettoyage des accolades fermantes orphelines attachées à des marqueurs markdown
         text = re.sub(r'\*\*\}([ \t]*)', '** ', text)
         text = re.sub(r'\*\}\b', '* ', text)
-        text = re.sub(r'(?<!\\)\}(?!\$)', '', text)
+        text = re.sub(r'`\}([ \t]*)', '` ', text)
 
         # Restauration des blocs mathématiques KaTeX intacts
         for token, math_content in math_map.items():
@@ -672,6 +679,78 @@ class DiffEngine:
         return leading_ws + cls.wrap_inline_block(core, "span", active_style, extra) + trailing_ws
 
     @classmethod
+    def apply_paragraph_block_diff(
+        cls,
+        text: str,
+        threshold: float = PARAGRAPH_BLOCK_DIFF_THRESHOLD,
+        is_collab: bool = False,
+        author_name: str = ""
+    ) -> str:
+        """
+        Convertit en mode bloc les paragraphes dont le taux de modification dépasse le seuil :
+        taux = (mots_supprimes + mots_ajoutes) / (mots_ancien + mots_nouveau).
+        Au-delà du seuil (défaut 0.5 = 50%), affiche le paragraphe d'origine entier (supprimé),
+        puis le nouveau paragraphe entier (ajouté).
+        """
+        paras = text.split("\n\n")
+        out_paras: List[str] = []
+
+        del_span_re = re.compile(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>(.*?)</span>', re.DOTALL)
+        ins_span_re = re.compile(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', re.DOTALL)
+
+        for p in paras:
+            p_strip = p.strip()
+            # Ignorer les lignes de titres, tables, blocs mathématiques ou callouts/citations
+            if p_strip.startswith(('#', '|', '$$', '![', '>')):
+                out_paras.append(p)
+                continue
+
+            has_del = bool(del_span_re.search(p))
+            has_ins = bool(ins_span_re.search(p))
+            if not (has_del or has_ins):
+                out_paras.append(p)
+                continue
+
+            del_text = " ".join(del_span_re.findall(p))
+            ins_text = " ".join(ins_span_re.findall(p))
+
+            tb, ta = cls.extract_paragraph_diff_texts(p)
+
+            mots_supp = len(re.findall(r'\b\w+\b', del_text))
+            mots_ajoutes = len(re.findall(r'\b\w+\b', ins_text))
+            mots_ancien = len(re.findall(r'\b\w+\b', tb))
+            mots_nouveau = len(re.findall(r'\b\w+\b', ta))
+
+            total_words = mots_ancien + mots_nouveau
+            taux = (mots_supp + mots_ajoutes) / total_words if total_words > 0 else 0.0
+
+            if taux > threshold:
+                collab = is_collab or bool(re.search(r'#(?:ffedd5|dbeafe)', p))
+                author = author_name
+                m_author = re.search(r'data-author="([^"]+)"', p)
+                if m_author:
+                    author = m_author.group(1)
+
+                is_quote = all(l.strip().startswith('>') for l in p.splitlines() if l.strip())
+
+                if not tb and ta:
+                    res = cls.format_ins(ta, is_collab=collab, author=author)
+                elif tb and not ta:
+                    res = cls.format_del(tb, is_collab=collab, author=author)
+                else:
+                    del_block = cls.format_del(tb, is_collab=collab, author=author)
+                    ins_block = cls.format_ins(ta, is_collab=collab, author=author)
+                    res = f"{del_block}\n\n{ins_block}"
+
+                if is_quote:
+                    res = "\n".join(f"> {l}" if l.strip() else ">" for l in res.splitlines())
+                out_paras.append(res)
+            else:
+                out_paras.append(p)
+
+        return "\n\n".join(out_paras)
+
+    @classmethod
     def diff_section_lines(
         cls,
         old_lines: List[str],
@@ -679,7 +758,8 @@ class DiffEngine:
         is_collab: bool = False,
         author_name: str = "",
         head_lines: Optional[List[str]] = None,
-        in_callout_diff: bool = False
+        in_callout_diff: bool = False,
+        block_diff_threshold: float = PARAGRAPH_BLOCK_DIFF_THRESHOLD
     ) -> Tuple[List[str], int, int, int, int]:
         """
         Compare chirurgicalement les lignes d'une section spécifique via difflib.SequenceMatcher(autojunk=False).
@@ -941,6 +1021,13 @@ class DiffEngine:
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
+        if not in_callout_diff:
+            diff_text = cls.apply_paragraph_block_diff(
+                diff_text,
+                threshold=block_diff_threshold,
+                is_collab=is_collab,
+                author_name=author_name
+            )
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
 
@@ -958,7 +1045,8 @@ class DiffEngine:
         new_text: str,
         is_collab: bool = False,
         author_name: str = "",
-        head_text: Optional[str] = None
+        head_text: Optional[str] = None,
+        block_diff_threshold: float = PARAGRAPH_BLOCK_DIFF_THRESHOLD
     ) -> Tuple[str, str, int, List[str]]:
         """
         Découpe en sections AST et produit le corps annoté ainsi que la Tree TOC.
@@ -998,7 +1086,8 @@ class DiffEngine:
             sec_lines, l_add, l_del, c_add, c_del = cls.diff_section_lines(
                 b_lines, c_lines,
                 is_collab=is_collab,
-                author_name=author_name
+                author_name=author_name,
+                block_diff_threshold=block_diff_threshold
             )
             annotated_document_lines.extend(sec_lines)
             annotated_document_lines.append("")

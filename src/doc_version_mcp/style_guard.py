@@ -547,6 +547,8 @@ def check_style(
 
     # Résolution de la langue (défaut 'en', 'fr' explicite, ou 'auto' avec contrôle Fail-Fast sur texte court)
     clean_lang = (language or "en").strip().lower()
+    if clean_lang in ("latex", "tex"):
+        clean_lang = "en"
     if clean_lang not in ("fr", "en", "auto"):
         raise ValueError(
             f"Langue '{language}' non supportée par Style Guard. "
