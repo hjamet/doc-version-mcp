@@ -527,26 +527,25 @@ class DiffEngine:
         if not text or "$$" not in text:
             return text
 
-        # 1. Nettoyer les balises de diff parasites collées directement aux délimiteurs $$
-        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>\s*\$\$\s*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
-        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>\s*\$\$', '\n\n$$\n\n', text)
-        text = re.sub(r'\$\$\s*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
+        # 1. Nettoyer les balises de diff parasites collées directement aux délimiteurs $$ sur la même ligne
+        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>[^\S\r\n]*\$\$[^\S\r\n]*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
+        text = re.sub(r'</?(?:ins|del|span)\b[^>]*>[^\S\r\n]*\$\$', '\n\n$$\n\n', text)
+        text = re.sub(r'\$\$[^\S\r\n]*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
 
-        # 2. Supprimer les délimiteurs $$ consécutifs vides résultant de collages
-        text = re.sub(r'\$\$\s*\$\$', '', text)
-
-        # 3. Pour chaque bloc $$...$$, isoler les $$ sur leurs propres lignes et éliminer tout tag HTML intérieur
+        # 2. Pour chaque bloc $$...$$, isoler les $$ sur leurs propres lignes et éliminer tout tag HTML intérieur
         def clean_display_math(match):
             inner = match.group(1)
             clean_inner = re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', inner)
             clean_inner = clean_inner.strip()
+            if not clean_inner:
+                return ""
             return f"\n\n$$\n{clean_inner}\n$$\n\n"
 
         text = re.sub(r'\$\$(.*?)\$\$', clean_display_math, text, flags=re.DOTALL)
 
-        # 4. Nettoyer les sauts de ligne excessifs autour des blocs math
+        # 3. Nettoyer les sauts de ligne excessifs autour des blocs math
         text = re.sub(r'\n{3,}', '\n\n', text)
-        return text
+        return text.strip()
 
     @classmethod
     def sanitize_inline_code_in_diff(cls, text: str) -> str:
@@ -751,6 +750,259 @@ class DiffEngine:
         return "\n\n".join(out_paras)
 
     @classmethod
+    def split_section_units(cls, text: str) -> List[str]:
+        """
+        Découpe une section Markdown en unités atomiques (paragraphes, équations KaTeX, citations, callouts, tables).
+        Isole rigoureusement les blocs display math $$...$$ et préserve la granularité des paragraphes.
+        """
+        text = re.sub(r'([^\n])\s*(\$\$.*?\$\$)', r'\1\n\n\2', text, flags=re.DOTALL)
+        text = re.sub(r'(\$\$.*?\$\$)\s*([^\n])', r'\1\n\n\2', text, flags=re.DOTALL)
+        text = re.sub(r'([^\n])\s*(>\s*\[![A-Z]+\])', r'\1\n\n\2', text)
+
+        raw = re.split(r'\n\s*\n+', text.strip())
+        units = []
+        i = 0
+        while i < len(raw):
+            u = raw[i].strip()
+            if not u:
+                i += 1
+                continue
+            while u.count('$$') % 2 != 0 and i + 1 < len(raw):
+                i += 1
+                u = u + '\n\n' + raw[i].strip()
+
+            # Scinder les citations multi-paragraphes (ex: abstract) séparées par >\n
+            if u.startswith('>') and not re.match(r'^>\s*\[![A-Z]+\]', u) and re.search(r'\n>\s*\n', u):
+                sub_quotes = re.split(r'\n>\s*\n', u)
+                for sq in sub_quotes:
+                    sq_s = sq.strip()
+                    if sq_s:
+                        units.append(sq_s)
+            else:
+                units.append(u)
+            i += 1
+        return units
+
+    @classmethod
+    def get_unit_type(cls, u: str) -> str:
+        """Détermine la nature structurelle d'une unité Markdown."""
+        if u.startswith('$$') and u.endswith('$$'):
+            return 'math'
+        if u.startswith('|') and '|' in u[1:]:
+            return 'table'
+        if re.match(r'^>\s*\[![A-Z]+\]', u):
+            return 'callout'
+        if u.startswith('>'):
+            return 'quote'
+        if u.startswith('#'):
+            return 'heading'
+        return 'paragraph'
+
+    @classmethod
+    def align_section_units(
+        cls,
+        u_old: List[str],
+        u_new: List[str]
+    ) -> List[Tuple[str, Optional[int], Optional[int]]]:
+        """
+        Aligne les unités atomiques de deux sections par programmation dynamique monotone.
+        Garantit que les suppressions précèdent toujours les ajouts lors des substitutions non-alignées.
+        """
+        n, m = len(u_old), len(u_new)
+        dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+        back = [[(0, 0)] * (m + 1) for _ in range(n + 1)]
+
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                t_old = cls.get_unit_type(u_old[i-1])
+                t_new = cls.get_unit_type(u_new[j-1])
+
+                sim = 0.0
+                if t_old == t_new:
+                    if u_old[i-1] == u_new[j-1]:
+                        sim = 2.0
+                    elif t_old == 'math':
+                        ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
+                        if ratio >= 0.35:
+                            sim = 1.0 + ratio
+                    elif t_old in ('quote', 'paragraph', 'callout'):
+                        ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
+                        if ratio >= 0.20:
+                            sim = ratio
+
+                best_val = dp[i-1][j]
+                best_choice = (i-1, j)
+
+                if dp[i][j-1] > best_val:
+                    best_val = dp[i][j-1]
+                    best_choice = (i, j-1)
+
+                if sim > 0.0 and dp[i-1][j-1] + sim > best_val:
+                    best_val = dp[i-1][j-1] + sim
+                    best_choice = (i-1, j-1)
+
+                dp[i][j] = best_val
+                back[i][j] = best_choice
+
+        raw_alignment = []
+        curr_i, curr_j = n, m
+        while curr_i > 0 or curr_j > 0:
+            prev_i, prev_j = back[curr_i][curr_j]
+            if prev_i == curr_i - 1 and prev_j == curr_j - 1:
+                raw_alignment.append(('pair', curr_i - 1, curr_j - 1))
+            elif prev_i == curr_i - 1 and prev_j == curr_j:
+                raw_alignment.append(('delete', curr_i - 1, None))
+            elif prev_i == curr_i and prev_j == curr_j - 1:
+                raw_alignment.append(('insert', None, curr_j - 1))
+            else:
+                break
+            curr_i, curr_j = prev_i, prev_j
+        raw_alignment.reverse()
+
+        # Réorganiser pour que les suppressions précèdent strictement les insertions
+        ordered = []
+        idx = 0
+        while idx < len(raw_alignment):
+            if raw_alignment[idx][0] == 'pair':
+                ordered.append(raw_alignment[idx])
+                idx += 1
+            else:
+                chunk = []
+                while idx < len(raw_alignment) and raw_alignment[idx][0] in ('delete', 'insert'):
+                    chunk.append(raw_alignment[idx])
+                    idx += 1
+                dels = [op for op in chunk if op[0] == 'delete']
+                inss = [op for op in chunk if op[0] == 'insert']
+                ordered.extend(dels)
+                ordered.extend(inss)
+        return ordered
+
+    @classmethod
+    def word_diff_single_unit(
+        cls,
+        u_old: str,
+        u_new: str,
+        is_collab: bool = False,
+        author_name: str = ""
+    ) -> Tuple[str, int, int, int, int]:
+        """Effectue une comparaison mot à mot chirurgicale au sein d'une unique unité textuelle."""
+        token_pattern = re.compile(
+            r'\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
+            r'(?<!`)`{3}(?!`)(?:[^`\n]|`{1,2}(?!`))+`{3}(?!`)|(?<!`)`{2}(?!`)(?:[^`\n]|`(?!=`))+`{2}(?!`)|(?<!`)`[^`\n]+`(?!`)|'
+            r'\s+|\w+|[^\w\s]',
+            re.DOTALL | re.UNICODE
+        )
+
+        old_is_q = all(l.strip().startswith('>') for l in u_old.splitlines() if l.strip())
+        new_is_q = all(l.strip().startswith('>') for l in u_new.splitlines() if l.strip())
+
+        clean_old = "\n".join(re.sub(r'^>+\s*', '', l) for l in u_old.splitlines()) if old_is_q else u_old
+        clean_new = "\n".join(re.sub(r'^>+\s*', '', l) for l in u_new.splitlines()) if new_is_q else u_new
+
+        tok_old = token_pattern.findall(clean_old)
+        tok_new = token_pattern.findall(clean_new)
+
+        matcher = difflib.SequenceMatcher(None, tok_old, tok_new, autojunk=False)
+        parts = []
+        local_add = local_del = collab_add = collab_del = 0
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                parts.append("".join(tok_new[j1:j2]))
+            elif tag == 'delete':
+                chk = "".join(tok_old[i1:i2])
+                if cls.has_substantive_words(chk):
+                    if is_collab:
+                        collab_del += 1
+                    else:
+                        local_del += 1
+                    parts.append(cls.format_del(chk, is_collab=is_collab, author=author_name))
+                else:
+                    parts.append(chk)
+            elif tag == 'insert':
+                chk = "".join(tok_new[j1:j2])
+                if cls.has_substantive_words(chk):
+                    if is_collab:
+                        collab_add += 1
+                    else:
+                        local_add += 1
+                    parts.append(cls.format_ins(chk, is_collab=is_collab, author=author_name))
+                else:
+                    parts.append(chk)
+            elif tag == 'replace':
+                c_d = "".join(tok_old[i1:i2])
+                c_i = "".join(tok_new[j1:j2])
+                if cls.has_substantive_words(c_d):
+                    if is_collab:
+                        collab_del += 1
+                    else:
+                        local_del += 1
+                    parts.append(cls.format_del(c_d, is_collab=is_collab, author=author_name))
+                else:
+                    parts.append(c_d)
+                if cls.has_substantive_words(c_i):
+                    if is_collab:
+                        collab_add += 1
+                    else:
+                        local_add += 1
+                    parts.append(cls.format_ins(c_i, is_collab=is_collab, author=author_name))
+                else:
+                    parts.append(c_i)
+
+        res = "".join(parts)
+        if old_is_q and new_is_q:
+            res = "\n".join(f"> {l}" if l.strip() else ">" for l in res.splitlines())
+        return res, local_add, local_del, collab_add, collab_del
+
+    @classmethod
+    def diff_unit_pair(
+        cls,
+        u_old: str,
+        u_new: str,
+        is_collab: bool = False,
+        author_name: str = "",
+        threshold: float = PARAGRAPH_BLOCK_DIFF_THRESHOLD
+    ) -> Tuple[str, int, int, int, int]:
+        """Compare une paire d'unités appariées, appliquant le mode bloc si le taux de modification dépasse le seuil."""
+        if u_old.strip() == u_new.strip():
+            return u_new, 0, 0, 0, 0
+
+        t_old = cls.get_unit_type(u_old)
+        t_new = cls.get_unit_type(u_new)
+
+        if t_old == 'math' and t_new == 'math':
+            l_add = 0 if is_collab else 1
+            l_del = 0 if is_collab else 1
+            c_add = 1 if is_collab else 0
+            c_del = 1 if is_collab else 0
+            return f"{u_old.strip()}\n\n{u_new.strip()}", l_add, l_del, c_add, c_del
+
+        clean_old = re.sub(r'^>+\s*', '', u_old, flags=re.MULTILINE)
+        clean_new = re.sub(r'^>+\s*', '', u_new, flags=re.MULTILINE)
+        w_old = re.findall(r'\b\w+\b', clean_old)
+        w_new = re.findall(r'\b\w+\b', clean_new)
+
+        tok_re = re.compile(r'\s+|\w+|[^\w\s]', re.DOTALL | re.UNICODE)
+        t_o = tok_re.findall(clean_old)
+        t_n = tok_re.findall(clean_new)
+        m = difflib.SequenceMatcher(None, t_o, t_n, autojunk=False)
+        del_w = sum(len(re.findall(r'\b\w+\b', "".join(t_o[i1:i2]))) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag in ('delete', 'replace'))
+        ins_w = sum(len(re.findall(r'\b\w+\b', "".join(t_n[j1:j2]))) for tag, i1, i2, j1, j2 in m.get_opcodes() if tag in ('insert', 'replace'))
+        total_w = len(w_old) + len(w_new)
+        rate = (del_w + ins_w) / total_w if total_w > 0 else 0.0
+
+        if rate > threshold:
+            del_b = cls.format_del(u_old, is_collab=is_collab, author=author_name)
+            ins_b = cls.format_ins(u_new, is_collab=is_collab, author=author_name)
+            l_del = 0 if is_collab else len([l for l in u_old.splitlines() if cls.has_substantive_words(l)])
+            l_add = 0 if is_collab else len([l for l in u_new.splitlines() if cls.has_substantive_words(l)])
+            c_del = len([l for l in u_old.splitlines() if cls.has_substantive_words(l)]) if is_collab else 0
+            c_add = len([l for l in u_new.splitlines() if cls.has_substantive_words(l)]) if is_collab else 0
+            return f"{del_b}\n\n{ins_b}", l_add, l_del, c_add, c_del
+        else:
+            return cls.word_diff_single_unit(u_old, u_new, is_collab=is_collab, author_name=author_name)
+
+    @classmethod
     def diff_section_lines(
         cls,
         old_lines: List[str],
@@ -762,12 +1014,11 @@ class DiffEngine:
         block_diff_threshold: float = PARAGRAPH_BLOCK_DIFF_THRESHOLD
     ) -> Tuple[List[str], int, int, int, int]:
         """
-        Compare chirurgicalement les lignes d'une section spécifique via difflib.SequenceMatcher(autojunk=False).
+        Compare chirurgicalement les lignes d'une section spécifique par alignement unitaire paragraphe par paragraphe.
         Retourne : (clean_lines, local_add, local_del, collab_add, collab_del)
         """
         old_text = "\n".join(old_lines)
         new_text = "\n".join(new_lines)
-        head_text = "\n".join(head_lines) if head_lines is not None else None
 
         if old_text.strip() == new_text.strip():
             return list(new_lines), 0, 0, 0, 0
@@ -775,268 +1026,57 @@ class DiffEngine:
         if not cls.has_substantive_words(old_text) and not cls.has_substantive_words(new_text):
             return list(new_lines), 0, 0, 0, 0
 
-        if not old_text.strip() or not cls.has_substantive_words(old_text):
-            if not cls.has_substantive_words(new_text):
-                return list(new_lines), 0, 0, 0, 0
-            new_masked, new_tables = cls.mask_tables_in_text(new_text)
-            new_masked, new_figures = cls.mask_figures_in_text(new_masked)
-            blocks = re.split(r'(\n\s*\n+)', new_masked)
-            out_blocks = []
-            loc_add = 0
-            col_add = 0
-            for b in blocks:
-                if not b.strip() or re.match(r'^\s*#{1,6}\s', b) or any(tok in b for tok in list(new_tables.keys()) + list(new_figures.keys())):
-                    out_blocks.append(b)
-                elif cls.has_substantive_words(b):
-                    if is_collab:
-                        col_add += 1
-                        out_blocks.append(cls.format_ins(b, is_collab=True, author=author_name))
-                    else:
-                        loc_add += 1
-                        out_blocks.append(cls.format_ins(b, is_collab=False, author="agent"))
-                else:
-                    out_blocks.append(b)
-            res_text = "".join(out_blocks)
-            for tok, tbl in new_tables.items():
-                res_text = res_text.replace(tok, tbl)
-            for tok, fig in new_figures.items():
-                res_text = res_text.replace(tok, fig)
-            res_text = cls.sanitize_katex_in_diff(res_text)
-            res_text = cls.sanitize_inline_code_in_diff(res_text)
-            return res_text.splitlines(), max(1, loc_add) if (loc_add > 0 or col_add == 0) else 0, 0, col_add, 0
-
-        if not new_text.strip() or not cls.has_substantive_words(new_text):
-            del_count = len([l for l in old_lines if cls.has_substantive_words(l)])
-            if is_collab:
-                formatted_del = cls.format_del(old_text, is_collab=True, author=author_name)
-                formatted_del = cls.sanitize_katex_in_diff(formatted_del)
-                formatted_del = cls.sanitize_inline_code_in_diff(formatted_del)
-                return formatted_del.splitlines(), 0, 0, 0, del_count
-            else:
-                formatted_del = cls.format_del(old_text, is_collab=False, author="agent")
-                formatted_del = cls.sanitize_katex_in_diff(formatted_del)
-                formatted_del = cls.sanitize_inline_code_in_diff(formatted_del)
-                return formatted_del.splitlines(), 0, del_count, 0, 0
-
-        # Isolation des tables et figures
+        # Masquage atomique des tables
         old_masked, old_tables = cls.mask_tables_in_text(old_text)
         new_masked, new_tables = cls.mask_tables_in_text(new_text)
-        old_masked, old_figures = cls.mask_figures_in_text(old_masked)
-        new_masked, new_figures = cls.mask_figures_in_text(new_masked)
 
-        pair_diffs: Dict[str, str] = {}
-        deleted_callouts: Dict[str, str] = {}
-        added_callouts: Dict[str, str] = {}
-        callout_l_add = 0
-        callout_l_del = 0
-        callout_c_add = 0
-        callout_c_del = 0
+        u_old = cls.split_section_units(old_masked)
+        u_new = cls.split_section_units(new_masked)
 
-        if not in_callout_diff:
-            old_masked_c, old_callouts = cls.extract_callouts(old_masked)
-            new_masked_c, new_callouts = cls.extract_callouts(new_masked)
+        aligned = cls.align_section_units(u_old, u_new)
 
-            if old_callouts or new_callouts:
-                matched_pairs: List[Tuple[int, int]] = []
-                used_old: Set[int] = set()
-                used_new: Set[int] = set()
+        res_parts = []
+        tot_l_add = tot_l_del = tot_c_add = tot_c_del = 0
 
-                for i, oc in enumerate(old_callouts):
-                    for j, nc in enumerate(new_callouts):
-                        if j not in used_new and oc.raw_text.strip() == nc.raw_text.strip():
-                            matched_pairs.append((i, j))
-                            used_old.add(i)
-                            used_new.add(j)
-                            break
-
-                candidates = []
-                for i, oc in enumerate(old_callouts):
-                    if i in used_old:
-                        continue
-                    w1 = set(re.findall(r'\w+', oc.raw_text.lower()))
-                    for j, nc in enumerate(new_callouts):
-                        if j in used_new:
-                            continue
-                        w2 = set(re.findall(r'\w+', nc.raw_text.lower()))
-                        jaccard = len(w1 & w2) / max(len(w1 | w2), 1)
-                        ratio = difflib.SequenceMatcher(None, oc.raw_text, nc.raw_text, autojunk=False).ratio()
-                        type_bonus = 0.15 if oc.c_type == nc.c_type else 0.0
-                        score = max(jaccard, ratio) + type_bonus
-                        if score >= 0.30:
-                            candidates.append((score, i, j))
-
-                candidates.sort(reverse=True, key=lambda x: x[0])
-                for score, i, j in candidates:
-                    if i not in used_old and j not in used_new:
-                        matched_pairs.append((i, j))
-                        used_old.add(i)
-                        used_new.add(j)
-
-                for pair_idx, (i, j) in enumerate(matched_pairs):
-                    shared_tok = f"___MD_CALLOUT_PAIR_{pair_idx}___"
-                    old_tok = f"___MD_CALLOUT_BLOCK_{i}___"
-                    new_tok = f"___MD_CALLOUT_BLOCK_{j}___"
-                    old_masked_c = old_masked_c.replace(old_tok, shared_tok)
-                    new_masked_c = new_masked_c.replace(new_tok, shared_tok)
-
-                    oc = old_callouts[i]
-                    nc = new_callouts[j]
-                    diffed_str, p_la, p_ld, p_ca, p_cd = cls.diff_callout_pair(oc, nc, is_collab=is_collab, author_name=author_name)
-                    pair_diffs[shared_tok] = diffed_str
-                    callout_l_add += p_la
-                    callout_l_del += p_ld
-                    callout_c_add += p_ca
-                    callout_c_del += p_cd
-
-                for i, oc in enumerate(old_callouts):
-                    if i not in used_old:
-                        old_tok = f"___MD_CALLOUT_BLOCK_{i}___"
-                        formatted_del = cls.format_del(oc.raw_text.rstrip('\r\n'), is_collab=is_collab, author=author_name)
-                        suffix = "\n" if oc.raw_text.endswith("\n") else ""
-                        deleted_callouts[old_tok] = formatted_del + suffix
-                        d_cnt = len([l for l in oc.lines if cls.has_substantive_words(l)])
-                        if is_collab:
-                            callout_c_del += d_cnt
-                        else:
-                            callout_l_del += d_cnt
-
-                for j, nc in enumerate(new_callouts):
-                    if j not in used_new:
-                        new_tok = f"___MD_CALLOUT_BLOCK_{j}___"
-                        formatted_ins = cls.format_ins(nc.raw_text.rstrip('\r\n'), is_collab=is_collab, author=author_name)
-                        suffix = "\n" if nc.raw_text.endswith("\n") else ""
-                        added_callouts[new_tok] = formatted_ins + suffix
-                        a_cnt = len([l for l in nc.lines if cls.has_substantive_words(l)])
-                        if is_collab:
-                            callout_c_add += a_cnt
-                        else:
-                            callout_l_add += a_cnt
-
-                old_masked = old_masked_c
-                new_masked = new_masked_c
-
-        token_pattern = re.compile(
-            r'___MD_CALLOUT_[A-Z0-9_]+___|___MD_TABLE_[A-Z0-9_]+___|___MD_FIGURE_[A-Z0-9_]+___|\$\$.*?\$\$|(?<!\$)\$(?!\$)(?:\\.|[^\$\\\n])+(?<!\$)\$(?!\$)|<!--.*?-->|'
-            r'(?<!`)`{3}(?!`)(?:[^`\n]|`{1,2}(?!`))+`{3}(?!`)|(?<!`)`{2}(?!`)(?:[^`\n]|`(?!=`))+`{2}(?!`)|(?<!`)`[^`\n]+`(?!`)|'
-            r'\s+|\w+|[^\w\s]',
-            re.DOTALL | re.UNICODE
-        )
-        old_tokens = token_pattern.findall(old_masked)
-        new_tokens = token_pattern.findall(new_masked)
-
-        matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-        result_parts: List[str] = []
-        local_add = 0
-        local_del = 0
-        collab_add = 0
-        collab_del = 0
-
-        def format_chunk(chunk: str, is_del: bool) -> str:
-            token_map = deleted_callouts if is_del else added_callouts
-            if not token_map:
-                if is_del:
-                    return cls.format_del(chunk, is_collab=is_collab, author=author_name) if cls.has_substantive_words(chunk) else chunk
+        for op, i, j in aligned:
+            if op == 'pair':
+                p_str, la, ld, ca, cd = cls.diff_unit_pair(u_old[i], u_new[j], is_collab=is_collab, author_name=author_name, threshold=block_diff_threshold)
+                res_parts.append(p_str)
+                tot_l_add += la
+                tot_l_del += ld
+                tot_c_add += ca
+                tot_c_del += cd
+            elif op == 'delete':
+                if cls.get_unit_type(u_old[i]) == 'math':
+                    res_parts.append(u_old[i].strip())
                 else:
-                    return cls.format_ins(chunk, is_collab=is_collab, author=author_name) if cls.has_substantive_words(chunk) else chunk
-
-            tok_pattern = "|".join(re.escape(k) for k in token_map.keys())
-            sub_parts = re.split(f"({tok_pattern})", chunk)
-            out = []
-            for sp in sub_parts:
-                if sp in token_map:
-                    out.append(token_map[sp])
-                elif sp:
-                    if is_del:
-                        if cls.has_substantive_words(sp):
-                            out.append(cls.format_del(sp, is_collab=is_collab, author=author_name))
-                        else:
-                            out.append(sp)
-                    else:
-                        if cls.has_substantive_words(sp):
-                            out.append(cls.format_ins(sp, is_collab=is_collab, author=author_name))
-                        else:
-                            out.append(sp)
-            return "".join(out)
-
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'equal':
-                result_parts.append("".join(new_tokens[j1:j2]))
-            elif tag == 'delete':
-                del_chunk = "".join(old_tokens[i1:i2])
-                has_del_callout = any(k in del_chunk for k in deleted_callouts)
-                if cls.has_substantive_words(del_chunk) or has_del_callout:
-                    if not has_del_callout:
-                        if is_collab:
-                            collab_del += 1
-                        else:
-                            local_del += 1
-                    result_parts.append(format_chunk(del_chunk, is_del=True))
-            elif tag == 'insert':
-                add_chunk = "".join(new_tokens[j1:j2])
-                has_add_callout = any(k in add_chunk for k in added_callouts)
-                if cls.has_substantive_words(add_chunk) or has_add_callout:
-                    if not has_add_callout:
-                        if is_collab:
-                            collab_add += 1
-                        else:
-                            local_add += 1
-                    result_parts.append(format_chunk(add_chunk, is_del=False))
+                    res_parts.append(cls.format_del(u_old[i], is_collab=is_collab, author=author_name))
+                cnt = len([l for l in u_old[i].splitlines() if cls.has_substantive_words(l)])
+                if is_collab:
+                    tot_c_del += cnt
                 else:
-                    result_parts.append(add_chunk)
-            elif tag == 'replace':
-                del_chunk = "".join(old_tokens[i1:i2])
-                add_chunk = "".join(new_tokens[j1:j2])
-                has_del_callout = any(k in del_chunk for k in deleted_callouts)
-                has_add_callout = any(k in add_chunk for k in added_callouts)
-
-                if cls.has_substantive_words(del_chunk) or has_del_callout:
-                    if not has_del_callout:
-                        if is_collab:
-                            collab_del += 1
-                        else:
-                            local_del += 1
-                    result_parts.append(format_chunk(del_chunk, is_del=True))
-
-                if cls.has_substantive_words(add_chunk) or has_add_callout:
-                    if not has_add_callout:
-                        if is_collab:
-                            collab_add += 1
-                        else:
-                            local_add += 1
-                    result_parts.append(format_chunk(add_chunk, is_del=False))
+                    tot_l_del += cnt
+            elif op == 'insert':
+                if cls.get_unit_type(u_new[j]) == 'math':
+                    res_parts.append(u_new[j].strip())
                 else:
-                    result_parts.append(add_chunk)
+                    res_parts.append(cls.format_ins(u_new[j], is_collab=is_collab, author=author_name))
+                cnt = len([l for l in u_new[j].splitlines() if cls.has_substantive_words(l)])
+                if is_collab:
+                    tot_c_add += cnt
+                else:
+                    tot_l_add += cnt
 
-        diff_text = "".join(result_parts)
-        for p_tok, p_str in pair_diffs.items():
-            diff_text = diff_text.replace(p_tok, p_str)
-        for d_tok, d_str in deleted_callouts.items():
-            diff_text = diff_text.replace(d_tok, d_str)
-        for a_tok, a_str in added_callouts.items():
-            diff_text = diff_text.replace(a_tok, a_str)
-        for t_tok, t_str in new_tables.items():
-            diff_text = diff_text.replace(t_tok, t_str)
-        for f_tok, f_str in new_figures.items():
-            diff_text = diff_text.replace(f_tok, f_str)
+        diff_text = "\n\n".join(res_parts)
+        for tok, tbl in new_tables.items():
+            diff_text = diff_text.replace(tok, tbl)
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
-        if not in_callout_diff:
-            diff_text = cls.apply_paragraph_block_diff(
-                diff_text,
-                threshold=block_diff_threshold,
-                is_collab=is_collab,
-                author_name=author_name
-            )
+
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
-
-        local_add += callout_l_add
-        local_del += callout_l_del
-        collab_add += callout_c_add
-        collab_del += callout_c_del
-
-        return clean_lines, local_add, local_del, collab_add, collab_del
+        return clean_lines, tot_l_add, tot_l_del, tot_c_add, tot_c_del
 
     @classmethod
     def generate_diff_annotated_body(

@@ -207,3 +207,112 @@ This paper introduces an innovative benchmark for generative recommendation.
     assert r"\keywords" not in res
     assert r"\and" not in res
     assert "This paper introduces an innovative benchmark" in res
+
+
+def test_diff_abstract_block_mode_and_quotes():
+    """
+    Vérifie qu'un abstract modifié > 90% dans un bloc de citation '>'
+    est rendu intégralement en bloc rouge (ancien) puis en bloc vert (nouveau),
+    avec le préfixe '>' préservé sur chaque ligne.
+    """
+    old_doc = (
+        "## Abstract\n\n"
+        "> Collaborative filtering (CF) algorithms degrade substantially in extreme sparse recommendation scenarios.\n"
+        ">\n"
+        "> Extensive offline evaluations across three diverse benchmarks demonstrate that our method outperforms baselines.\n"
+    )
+    new_doc = (
+        "## Abstract\n\n"
+        "> Recommendation systems on mobile devices require accurate on-device inference under tight latency budgets.\n"
+        ">\n"
+        "> Our distilled student model achieves superior throughput while preserving recommendation fidelity.\n"
+    )
+
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc, block_diff_threshold=0.5)
+
+    # 1. Vérifie la présence du bloc rouge (ancien abstract)
+    assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">Collaborative filtering', annotated)
+    # 2. Vérifie la présence du bloc vert (nouvel abstract)
+    assert re.search(r'>\s*<span style="[^"]*#dcfce7[^"]*">Recommendation systems', annotated)
+    # 3. L'ancien bloc rouge doit précéder le nouveau bloc vert
+    pos_del = annotated.find("Collaborative filtering")
+    pos_ins = annotated.find("Recommendation systems")
+    assert 0 <= pos_del < pos_ins
+    # 4. Aucun span ne contient de saut de ligne
+    spans_with_nl = re.findall(r'<span\b[^>]*>[^<]*\n[^<]*</span>', annotated)
+    assert len(spans_with_nl) == 0
+
+
+def test_diff_display_equations_separate_blocks():
+    """
+    Vérifie que les équations modifiées apparaissent dans deux blocs $$ distincts
+    (ancien puis nouveau), sans fusion dans un même bloc $$.
+    """
+    old_doc = (
+        "## Methodology\n\n"
+        "The teacher model produces the candidate rationale:\n\n"
+        "$$\n"
+        "r_u = \\mathcal{T}(P_u, C'_u, i^{*}_u).\n"
+        "$$\n\n"
+        "Next paragraph continues here.\n"
+    )
+    new_doc = (
+        "## Methodology\n\n"
+        "The teacher model produces the candidate rationale:\n\n"
+        "$$\n"
+        "r_u = \\mathcal{T}(P_u, C_u, i^{*}_u).\n"
+        "$$\n\n"
+        "Next paragraph continues here.\n"
+    )
+
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+
+    # Vérifie que les deux équations sont présentes
+    assert "C'_u" in annotated
+    assert "C_u" in annotated
+
+    # Vérifie qu'aucun bloc $$ ne contient les deux équations fusionnées
+    for block in re.findall(r'\$\$(.*?)\$\$', annotated, flags=re.DOTALL):
+        assert block.count("r_u =") <= 1
+
+    # Les équations doivent être dans des blocs séparés
+    math_blocks = re.findall(r'\$\$(.*?)\$\$', annotated, flags=re.DOTALL)
+    assert len(math_blocks) == 2
+
+    # Aucun span ne contient de saut de ligne
+    spans_with_nl = re.findall(r'<span\b[^>]*>[^<]*\n[^<]*</span>', annotated)
+    assert len(spans_with_nl) == 0
+
+
+def test_diff_zero_spans_with_newline_complex_section():
+    """
+    Vérifie sur une section mêlant citations, listes, inline math et display math
+    que le nombre de <span> contenant un saut de ligne est strictement 0.
+    """
+    old_doc = (
+        "## Section\n\n"
+        "> Quote line 1 with $x = 1$.\n"
+        "> Quote line 2 with $y = 2$.\n\n"
+        "Paragraph with detailed description of the retriever where $i^*_u \\notin C_u$.\n\n"
+        "$$\n"
+        "\\mathcal{L}_{\\text{old}} = \\sum_{i=1}^N (y_i - \\hat{y}_i)^2\n"
+        "$$\n\n"
+        "- Item 1: alpha\n"
+        "- Item 2: beta\n"
+    )
+    new_doc = (
+        "## Section\n\n"
+        "> Rewritten quote line 1 with updated $x = 10$.\n"
+        "> Rewritten quote line 2 with updated $y = 20$.\n\n"
+        "Modified paragraph with concise description of the shortlist with $i^*_u \\in C_u$.\n\n"
+        "$$\n"
+        "\\mathcal{L}_{\\text{new}} = -\\sum_{i=1}^N y_i \\log \\hat{y}_i\n"
+        "$$\n\n"
+        "- Item 1: alpha prime\n"
+        "- Item 2: beta prime\n"
+    )
+
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+    spans_with_nl = re.findall(r'<span\b[^>]*>[^<]*\n[^<]*</span>', annotated)
+    assert len(spans_with_nl) == 0
+
