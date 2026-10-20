@@ -291,6 +291,7 @@ class LatexToMarkdownConverter:
         """Convertit directement une chaîne LaTeX en Markdown propre."""
         if not text or not text.strip():
             return ""
+        text = re.sub(r'\\allowbreak(?![a-zA-Z])\s*', '', text)
         converter = cls(
             root_tex_path=None,
             bib_parser=bib_parser,
@@ -802,7 +803,7 @@ class LatexToMarkdownConverter:
         return text
 
     def convert_lists(self, text: str) -> str:
-        """Convertit itemize et enumerate en listes Markdown."""
+        """Convertit itemize et enumerate en listes Markdown avec résolution de la plus interne à la plus externe."""
         def parse_list(match):
             env_type = match.group(1)
             body = match.group(2)
@@ -816,7 +817,26 @@ class LatexToMarkdownConverter:
                 it = it.strip()
                 if not it:
                     continue
-                clean_it = " ".join([l.strip() for l in it.splitlines() if l.strip()])
+                lines = [l.strip() for l in it.splitlines() if l.strip()]
+                parent_parts = []
+                sub_lines = []
+                in_sub = False
+                for l in lines:
+                    if re.match(r'^(?:[-*]|\d+\.)\s+', l) or in_sub:
+                        in_sub = True
+                        sub_lines.append(f"  {l}")
+                    else:
+                        parent_parts.append(l)
+
+                clean_parent = " ".join(parent_parts)
+                if sub_lines:
+                    if clean_parent:
+                        clean_it = clean_parent + "\n" + "\n".join(sub_lines)
+                    else:
+                        clean_it = "\n".join(sub_lines)
+                else:
+                    clean_it = clean_parent
+
                 if env_type == 'enumerate':
                     md_items.append(f"{idx}. {clean_it}")
                     idx += 1
@@ -824,8 +844,14 @@ class LatexToMarkdownConverter:
                     md_items.append(f"- {clean_it}")
             return "\n\n" + "\n".join(md_items) + "\n\n"
 
-        for _ in range(3):
-            text = re.sub(r'\\begin\{(itemize|enumerate)\}(?:\s*\[[^\]]*\])?(.*?)\\end\{\1\}', parse_list, text, flags=re.DOTALL)
+        pattern_inner = re.compile(
+            r'\\begin\{(itemize|enumerate)\}(?:\s*\[[^\]]*\])?((?:(?!\\begin\{(?:itemize|enumerate)\}).)*?)\\end\{\1\}',
+            flags=re.DOTALL
+        )
+        for _ in range(5):
+            if not pattern_inner.search(text):
+                break
+            text = pattern_inner.sub(parse_list, text)
         return text
 
     @classmethod
@@ -1473,6 +1499,7 @@ class LatexToMarkdownConverter:
 
     def clean_inline_formatting(self, text: str) -> str:
         """Nettoie le formatage inline LaTeX avec protection KaTeX absolue."""
+        text = re.sub(r'\\allowbreak(?![a-zA-Z])\s*', '', text)
         text = re.sub(r'\\par\b', '\n\n', text)
         text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
         text = self.replace_shortstack(text)

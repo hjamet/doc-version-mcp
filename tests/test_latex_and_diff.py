@@ -374,3 +374,108 @@ def test_artifact_builder_utc_timestamp_conversion():
     assert "12:03:26" not in table
 
 
+def test_latex_allowbreak_removal():
+    """
+    Vérifie que \\allowbreak est rigoureusement nettoyé même à l'intérieur de \\texttt.
+    """
+    raw_tex = r"\texttt{clarity\_\allowbreak accuracy}"
+    md = LatexToMarkdownConverter.convert_text(raw_tex)
+    assert r"\allowbreak" not in md
+    assert "`clarity_accuracy`" in md
+
+
+def test_latex_nested_lists_inner_first():
+    """
+    Vérifie que les listes imbriquées (itemize avec sous-liste enumerate) sont
+    résolues de la plus interne à la plus externe et que les sous-items restent
+    sur des lignes séparées et indentées.
+    """
+    raw_tex = r"""
+\begin{itemize}
+    \item Item 1
+    \begin{enumerate}
+        \item Subitem 1.1
+        \item Subitem 1.2
+    \end{enumerate}
+    \item Item 2
+\end{itemize}
+"""
+    md = LatexToMarkdownConverter.convert_text(raw_tex)
+    assert "- Item 1" in md
+    assert "1. Subitem 1.1" in md
+    assert "2. Subitem 1.2" in md
+    assert "- Item 2" in md
+    lines = [l.strip() for l in md.splitlines() if l.strip()]
+    assert any("1. Subitem 1.1" in l for l in lines)
+    assert any("2. Subitem 1.2" in l for l in lines)
+
+
+def test_diff_engine_inserted_table_preservation():
+    """
+    Vérifie qu'un tableau Markdown inséré n'est pas enveloppé dans un span multi-lignes
+    qui casse le parseur Markdown, mais préserve les pipes et sa structure de table.
+    """
+    table_md = (
+        "| Technique | Precision | Recall |\n"
+        "| :--- | :---: | ---: |\n"
+        "| Baseline | 82.5 | 79.1 |\n"
+        "| Proposed | 89.4 | 88.0 |"
+    )
+    old_doc = "## Evaluation\n\nIntroductory text.\n"
+    new_doc = f"## Evaluation\n\nIntroductory text.\n\n{table_md}\n"
+
+    annotated, _, diff_count, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+
+    # 1. Le bloc table ne doit JAMAIS être enveloppé par un span multi-lignes global
+    assert not re.search(r'<span\b[^>]*>\s*\|', annotated)
+    assert not re.search(r'\|\s*</span>', annotated)
+
+    # 2. La structure de table Markdown avec le séparateur doit être intacte
+    assert re.search(r'\|\s*:?-{2,}:?\s*\|', annotated)
+
+    # 3. Les cellules de données doivent contenir les spans de surlignage vert
+    assert re.search(r'<span style="[^"]*#dcfce7[^"]*">Proposed</span>', annotated)
+    assert re.search(r'<span style="[^"]*#dcfce7[^"]*">89.4</span>', annotated)
+
+
+def test_diff_engine_empty_old_units_preservation():
+    """
+    Vérifie qu'une section dont l'ancienne version avait un sous-titre supprimé
+    (donc u_old = [] au niveau de la section mère et u_new contenant plusieurs
+    paragraphes, tableaux et figures) restitue 100 % des paragraphes, tableaux
+    et figures de u_new sans aucune perte.
+    """
+    old_doc = """## 4. Evaluation
+
+### 4.1 Subtitle
+Old paragraph under subtitle.
+"""
+    new_doc = """## 4. Evaluation
+
+First paragraph under evaluation.
+
+Second paragraph detailing methodology.
+
+| Metric | Accuracy |
+| :--- | :---: |
+| Model A | 95.2 |
+
+![Figure 1](figure1.png)
+
+Third concluding paragraph.
+"""
+    annotated, _, _, _ = DiffEngine.generate_diff_annotated_body(old_doc, new_doc)
+
+    assert "First paragraph under evaluation." in annotated
+    assert "Second paragraph detailing methodology." in annotated
+    assert "| :--- | :---: |" in annotated
+    assert "Metric" in annotated
+    assert "Accuracy" in annotated
+    assert "Model A" in annotated
+    assert "95.2" in annotated
+    assert "figure1.png" in annotated
+    assert "Third concluding paragraph." in annotated
+
+
+
+

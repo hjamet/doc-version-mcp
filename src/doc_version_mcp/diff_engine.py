@@ -4,6 +4,7 @@ diff_engine.py — Moteur AST de diff inline word-diff chirurgical multi-auteurs
 
 import re
 import difflib
+import hashlib
 from typing import Dict, List, Tuple, Optional, Set, Any
 
 
@@ -426,9 +427,11 @@ class DiffEngine:
 
                 has_sep = any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in tbl_lines)
                 if has_sep and len(tbl_lines) >= 2:
-                    token = f"___MD_TABLE_BLOCK_{len(table_map)}___"
+                    raw_tbl = "".join(tbl_lines)
+                    digest = hashlib.md5(raw_tbl.strip().encode('utf-8')).hexdigest()[:12]
+                    token = f"___MD_TABLE_BLOCK_{digest}___"
                     suffix = "\n" if tbl_lines[-1].endswith("\n") else ""
-                    table_map[token] = "".join(tbl_lines)
+                    table_map[token] = raw_tbl
                     out_lines.append(token + suffix)
                 else:
                     out_lines.extend(tbl_lines)
@@ -516,6 +519,67 @@ class DiffEngine:
             else:
                 cleaned_lines.append(l)
         return cleaned_lines
+
+    @classmethod
+    def format_table_diff(
+        cls,
+        table_str: str,
+        op: str,
+        is_collab: bool = False,
+        author: str = ""
+    ) -> str:
+        """
+        Formate un tableau Markdown en appliquant format_ins ou format_del
+        à l'intérieur de chaque cellule de données et d'en-tête, sans toucher
+        aux délimiteurs de colonnes '|' ni à la ligne de séparation '| :--- |'.
+        """
+        if not table_str:
+            return ""
+
+        lines = table_str.splitlines()
+        out_lines = []
+        for line in lines:
+            stripped = line.strip()
+            quote_prefix = ""
+            m_quote = re.match(r'^(>+\s*)', line)
+            if m_quote:
+                quote_prefix = m_quote.group(1)
+                stripped = line[len(quote_prefix):].strip()
+
+            if re.search(r'\|\s*:?-{2,}:?\s*\|', stripped) and all(c in '| :-' for c in stripped):
+                out_lines.append(line)
+                continue
+
+            if stripped.startswith('|') and '|' in stripped[1:]:
+                parts = stripped.split('|')
+                new_parts = []
+                for idx, part in enumerate(parts):
+                    if idx == 0 or idx == len(parts) - 1:
+                        new_parts.append(part)
+                    else:
+                        cell_content = part.strip()
+                        if cell_content:
+                            leading_ws = part[:len(part) - len(part.lstrip(' '))]
+                            trailing_ws = part[len(part.rstrip(' ')):]
+                            if op == 'insert':
+                                formatted_cell = cls.format_ins(cell_content, is_collab=is_collab, author=author)
+                            elif op == 'delete':
+                                formatted_cell = cls.format_del(cell_content, is_collab=is_collab, author=author)
+                            else:
+                                formatted_cell = cell_content
+                            new_parts.append(f"{leading_ws}{formatted_cell}{trailing_ws}")
+                        else:
+                            new_parts.append(part)
+                out_lines.append(f"{quote_prefix}{'|'.join(new_parts)}")
+            else:
+                if op == 'insert':
+                    out_lines.append(cls.format_ins(line, is_collab=is_collab, author=author))
+                elif op == 'delete':
+                    out_lines.append(cls.format_del(line, is_collab=is_collab, author=author))
+                else:
+                    out_lines.append(line)
+
+        return "\n".join(out_lines)
 
     @classmethod
     def sanitize_katex_in_diff(cls, text: str) -> str:
@@ -636,6 +700,8 @@ class DiffEngine:
         """Enrobe un texte supprimé dans un <span> stylisé."""
         if not text:
             return ""
+        if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
+            return cls.format_table_diff(text, op='delete', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
             return ""
         leading_ws = text[:len(text) - len(text.lstrip(' '))]
@@ -659,6 +725,8 @@ class DiffEngine:
         """Enrobe un texte ajouté dans un <span> stylisé."""
         if not text:
             return ""
+        if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
+            return cls.format_table_diff(text, op='insert', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
             return text
         leading_ws = text[:len(text) - len(text.lstrip(' '))]
@@ -793,17 +861,21 @@ class DiffEngine:
     @classmethod
     def get_unit_type(cls, u: str) -> str:
         """Détermine la nature structurelle d'une unité Markdown."""
-        if u.startswith('$$') and u.endswith('$$'):
-            return 'math'
-        if u.startswith('|') and '|' in u[1:]:
+        u_s = u.strip()
+        if "___MD_TABLE_BLOCK_" in u_s or (u_s.startswith('|') and '|' in u_s[1:]):
             return 'table'
+        u_no_quote = u_s.lstrip('>').strip()
+        if u_no_quote.startswith('|') and '|' in u_no_quote[1:]:
+            return 'table'
+        if u_s.startswith('$$') and u_s.endswith('$$'):
+            return 'math'
         if re.match(r'^\s*!\[.*?\]\(.*?\)\s*$', u) or re.match(r'^\s*!\[\[.*?\]\]\s*$', u):
             return 'image'
         if re.match(r'^>\s*\[![A-Z]+\]', u):
             return 'callout'
-        if u.startswith('>'):
+        if u_s.startswith('>'):
             return 'quote'
-        if u.startswith('#'):
+        if u_s.startswith('#'):
             return 'heading'
         return 'paragraph'
 
@@ -822,6 +894,13 @@ class DiffEngine:
         back = [[(0, 0)] * (m + 1) for _ in range(n + 1)]
 
         for i in range(1, n + 1):
+            dp[i][0] = dp[i - 1][0] - 0.1
+            back[i][0] = (i - 1, 0)
+        for j in range(1, m + 1):
+            dp[0][j] = dp[0][j - 1] - 0.1
+            back[0][j] = (0, j - 1)
+
+        for i in range(1, n + 1):
             for j in range(1, m + 1):
                 t_old = cls.get_unit_type(u_old[i-1])
                 t_new = cls.get_unit_type(u_new[j-1])
@@ -834,6 +913,8 @@ class DiffEngine:
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
                         if ratio >= 0.35:
                             sim = 1.0 + ratio
+                    elif t_old == 'table':
+                        sim = 1.5
                     elif t_old in ('quote', 'paragraph', 'callout', 'image'):
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
                         if ratio >= 0.20:
@@ -1062,41 +1143,77 @@ class DiffEngine:
 
         aligned = cls.align_section_units(u_old, u_new)
 
+        all_tables = {**old_tables, **new_tables}
         res_parts = []
         tot_l_add = tot_l_del = tot_c_add = tot_c_del = 0
 
         for op, i, j in aligned:
             if op == 'pair':
-                p_str, la, ld, ca, cd = cls.diff_unit_pair(u_old[i], u_new[j], is_collab=is_collab, author_name=author_name, threshold=block_diff_threshold)
-                res_parts.append(p_str)
-                tot_l_add += la
-                tot_l_del += ld
-                tot_c_add += ca
-                tot_c_del += cd
-            elif op == 'delete':
-                if cls.get_unit_type(u_old[i]) == 'math':
-                    res_parts.append(u_old[i].strip())
+                u_o = u_old[i]
+                u_n = u_new[j]
+                t_o = cls.get_unit_type(u_o)
+                t_n = cls.get_unit_type(u_n)
+                if t_o == 'table' and t_n == 'table':
+                    raw_o = all_tables.get(u_o.strip(), u_o)
+                    raw_n = all_tables.get(u_n.strip(), u_n)
+                    if raw_o.strip() == raw_n.strip():
+                        res_parts.append(raw_n.strip())
+                    else:
+                        del_tbl = cls.format_table_diff(raw_o, op='delete', is_collab=is_collab, author=author_name)
+                        ins_tbl = cls.format_table_diff(raw_n, op='insert', is_collab=is_collab, author=author_name)
+                        res_parts.append(f"{del_tbl}\n\n{ins_tbl}")
+                        cnt_o = len([l for l in raw_o.splitlines() if cls.has_substantive_words(l)])
+                        cnt_n = len([l for l in raw_n.splitlines() if cls.has_substantive_words(l)])
+                        if is_collab:
+                            tot_c_del += cnt_o
+                            tot_c_add += cnt_n
+                        else:
+                            tot_l_del += cnt_o
+                            tot_l_add += cnt_n
                 else:
-                    res_parts.append(cls.format_del(u_old[i], is_collab=is_collab, author=author_name))
-                cnt = len([l for l in u_old[i].splitlines() if cls.has_substantive_words(l)])
+                    p_str, la, ld, ca, cd = cls.diff_unit_pair(u_o, u_n, is_collab=is_collab, author_name=author_name, threshold=block_diff_threshold)
+                    res_parts.append(p_str)
+                    tot_l_add += la
+                    tot_l_del += ld
+                    tot_c_add += ca
+                    tot_c_del += cd
+            elif op == 'delete':
+                u_del = u_old[i]
+                t_del = cls.get_unit_type(u_del)
+                if t_del == 'math':
+                    res_parts.append(u_del.strip())
+                elif t_del == 'table':
+                    raw_del = all_tables.get(u_del.strip(), u_del)
+                    res_parts.append(cls.format_table_diff(raw_del, op='delete', is_collab=is_collab, author=author_name))
+                else:
+                    res_parts.append(cls.format_del(u_del, is_collab=is_collab, author=author_name))
+                raw_for_cnt = all_tables.get(u_del.strip(), u_del) if t_del == 'table' else u_del
+                cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
                 if is_collab:
                     tot_c_del += cnt
                 else:
                     tot_l_del += cnt
             elif op == 'insert':
-                if cls.get_unit_type(u_new[j]) == 'math':
-                    res_parts.append(u_new[j].strip())
+                u_ins = u_new[j]
+                t_ins = cls.get_unit_type(u_ins)
+                if t_ins == 'math':
+                    res_parts.append(u_ins.strip())
+                elif t_ins == 'table':
+                    raw_ins = all_tables.get(u_ins.strip(), u_ins)
+                    res_parts.append(cls.format_table_diff(raw_ins, op='insert', is_collab=is_collab, author=author_name))
                 else:
-                    res_parts.append(cls.format_ins(u_new[j], is_collab=is_collab, author=author_name))
-                cnt = len([l for l in u_new[j].splitlines() if cls.has_substantive_words(l)])
+                    res_parts.append(cls.format_ins(u_ins, is_collab=is_collab, author=author_name))
+                raw_for_cnt = all_tables.get(u_ins.strip(), u_ins) if t_ins == 'table' else u_ins
+                cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
                 if is_collab:
                     tot_c_add += cnt
                 else:
                     tot_l_add += cnt
 
         diff_text = "\n\n".join(res_parts)
-        for tok, tbl in new_tables.items():
-            diff_text = diff_text.replace(tok, tbl)
+        for tok, tbl in all_tables.items():
+            if tok in diff_text:
+                diff_text = diff_text.replace(tok, tbl)
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
