@@ -1524,6 +1524,64 @@ def test_diff_engine_deleted_callout_among_multiples():
     assert re.search(r'>\s*<span style="[^"]*#fee2e2[^"]*">\*\*Verification Checkpoint 2\*\*: Check B\.</span>', annotated_body)
 
 
+def test_no_duplicate_revision_note_and_no_intro_preamble_on_sectionless_doc():
+    """
+    Vérifie que :
+    1. diff_explanation n'est pas dupliqué dans l'arborescence (absence de '💬 **Note de révision :**').
+    2. Un document sans titres (courriel ou message court) ne crée pas de faux titre 'Introduction & Préambule',
+       mais affiche un résumé global 'Modifications globales dans le document' sans ancre Markdown cassée.
+    3. modified_sections ne contient ni 'Introduction & Préambule' ni 'Préambule'.
+    """
+    old_email = (
+        "Bonjour Thomas,\n\n"
+        "Je te partage le premier jet du plan pour validation.\n\n"
+        "Bien à toi,\nHenri"
+    )
+    new_email = (
+        "Bonjour Thomas,\n\n"
+        "Je te partage le plan actualisé pour relecture rapide.\n\n"
+        "Bien à toi,\nHenri"
+    )
+
+    annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
+        old_text=old_email,
+        new_text=new_email,
+        is_collab=False,
+        author_name="agent"
+    )
+
+    assert diff_count >= 1
+    assert "Introduction & Préambule" not in tree_toc
+    assert "Préambule" not in tree_toc
+    assert "#introduction--prambule" not in tree_toc
+    assert "Modifications globales dans le document" in tree_toc
+    assert "Introduction & Préambule" not in mod_sections
+    assert "Préambule" not in mod_sections
+
+    explanation = "Remplacement de premier jet par plan actualisé"
+    artifact = ArtifactBuilder.assemble_brain_artifact(
+        target_name="draft_email",
+        annotated_body=annotated_body,
+        tree_toc=tree_toc,
+        diff_count=diff_count,
+        diff_explanation=explanation,
+        final_content=new_email,
+        mode="draft"
+    )
+
+    # 1. diff_explanation doit être présent dans le callout de synthèse en tête
+    assert "🔄 Synthèse des Travaux Récents & Conciliation Collaborative" in artifact
+    assert explanation in artifact
+
+    # 2. Absence totale de répétition '💬 **Note de révision :**' dans l'arborescence
+    assert "💬 **Note de révision :**" not in artifact
+    assert "💬 Note de révision :" not in artifact
+
+    # 3. Absence de faux titre dans l'artefact complet
+    assert "Introduction & Préambule" not in artifact
+
+
+
 
 
 

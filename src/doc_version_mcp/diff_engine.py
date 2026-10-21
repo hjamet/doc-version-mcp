@@ -241,8 +241,8 @@ class DiffEngine:
         text = re.sub(r'\\xspace\s*([,.:;!?\'"\)\}\]])', r'\1', text)
         text = re.sub(r'\\xspace\b\s*', ' ', text)
         text = text.replace('~', ' ').replace(r'\,', ' ').replace(r'\&', '&').replace(r'\_', '_').replace(r'\#', '#').replace(r'\%', '%')
-        text = re.sub(r'(?<![\n:|\-])---(?![\n:|\-])', '—', text)
-        text = re.sub(r'(?<![\n:|\-])--(?![\n:|\-])', '–', text)
+        text = re.sub(r'(?<![\n:|\-])---(?![\n:|\-a-zA-Z])', '—', text)
+        text = re.sub(r'(?<![\n:|\-])--(?![\n:|\-a-zA-Z])', '–', text)
         text = re.sub(r'\\+\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\\+\s*\|', '|', text)
 
@@ -1137,6 +1137,8 @@ class DiffEngine:
         section_stats: Dict[str, Dict[str, int]] = {}
         annotated_document_lines: List[str] = []
 
+        has_real_sections = any(bool(s.heading.strip()) or (s.title != "Préambule" and bool(s.title.strip())) for s in new_sections)
+
         for new_sec in new_sections:
             norm = new_sec.normalized_title
             matching_old = cls.find_matching_section(norm, old_sec_map, used_old_secs)
@@ -1147,7 +1149,11 @@ class DiffEngine:
             if matching_old:
                 used_old_secs.add(matching_old)
 
-            sec_display_name = new_sec.title if new_sec.title != "Préambule" else "Introduction & Préambule"
+            if new_sec.title == "Préambule":
+                sec_display_name = "En-tête (avant la 1re section)" if has_real_sections else "Modifications globales dans le document"
+            else:
+                sec_display_name = new_sec.title
+
             if new_sec.heading:
                 annotated_document_lines.append(new_sec.heading)
                 annotated_document_lines.append("")
@@ -1185,12 +1191,30 @@ class DiffEngine:
 
         # Génération Tree TOC
         tree_lines = []
-        if total_diff_count > 0 and section_stats:
+        if not has_real_sections:
+            if total_diff_count > 0:
+                tot_l_add = sum(s.get("local_add", 0) for s in section_stats.values())
+                tot_l_del = sum(s.get("local_del", 0) for s in section_stats.values())
+                tot_c_add = sum(s.get("collab_add", 0) for s in section_stats.values())
+                tot_c_del = sum(s.get("collab_del", 0) for s in section_stats.values())
+                stat_parts = []
+                if tot_l_add > 0:
+                    stat_parts.append(f"🟢 +{tot_l_add}")
+                if tot_l_del > 0:
+                    stat_parts.append(f"🔴 -{tot_l_del}")
+                if tot_c_add > 0:
+                    stat_parts.append(f"🔵 +{tot_c_add}")
+                if tot_c_del > 0:
+                    stat_parts.append(f"🟠 -{tot_c_del}")
+                stat_str = " / ".join(stat_parts) if stat_parts else "0 delta"
+                tree_lines.append(f"> └── 📊 **Modifications globales dans le document** *({stat_str})*<br>")
+            else:
+                tree_lines.append("> └── 📊 **Document sans section** *(0 delta)*<br>")
+        elif total_diff_count > 0 and section_stats:
             sec_items = list(section_stats.items())
             for idx, (sec_name, stats) in enumerate(sec_items):
                 is_last = (idx == len(sec_items) - 1)
                 branch = "└──" if is_last else "├──"
-                anchor = re.sub(r'[^a-zA-Z0-9\s\-]+', '', sec_name).strip().lower().replace(' ', '-')
 
                 l_add = stats.get("local_add", 0)
                 l_del = stats.get("local_del", 0)
@@ -1208,22 +1232,30 @@ class DiffEngine:
                     stat_parts.append(f"🟠 -{c_del}")
 
                 stat_str = " / ".join(stat_parts) if stat_parts else "0 delta"
-                tree_lines.append(f"> {branch} 📍 **[{sec_name}](#{anchor})** *({stat_str})*<br>")
+                if sec_name == "En-tête (avant la 1re section)":
+                    tree_lines.append(f"> {branch} 📍 **{sec_name}** *({stat_str})*<br>")
+                else:
+                    anchor = re.sub(r'[^a-zA-Z0-9\s\-]+', '', sec_name).strip().lower().replace(' ', '-')
+                    tree_lines.append(f"> {branch} 📍 **[{sec_name}](#{anchor})** *({stat_str})*<br>")
         else:
             valid_secs = [s for s in new_sections if s.title != "Préambule" and (s.heading or cls.has_substantive_words("\n".join(s.lines)))]
             for idx, sec in enumerate(valid_secs):
                 is_last = (idx == len(valid_secs) - 1)
                 branch = "└──" if is_last else "├──"
-                sec_name = sec.title if sec.title != "Préambule" else "Introduction & Préambule"
-                anchor = re.sub(r'[^a-zA-Z0-9\s\-]+', '', sec_name).strip().lower().replace(' ', '-')
-                tree_lines.append(f"> {branch} 📍 **[{sec_name}](#{anchor})**<br>")
+                sec_name = sec.title if sec.title != "Préambule" else "En-tête (avant la 1re section)"
+                if sec_name == "En-tête (avant la 1re section)":
+                    tree_lines.append(f"> {branch} 📍 **{sec_name}**<br>")
+                else:
+                    anchor = re.sub(r'[^a-zA-Z0-9\s\-]+', '', sec_name).strip().lower().replace(' ', '-')
+                    tree_lines.append(f"> {branch} 📍 **[{sec_name}](#{anchor})**<br>")
 
         tree_toc = "\n".join(tree_lines)
         annotated_body = "\n".join(annotated_document_lines)
         annotated_body = re.sub(r'\n{3,}', '\n\n', annotated_body).strip()
         annotated_body = cls.sanitize_katex_in_diff(annotated_body)
 
-        return annotated_body, tree_toc, total_diff_count, list(section_stats.keys())
+        modified_sections = [k for k in section_stats.keys() if k not in ("Préambule", "Introduction & Préambule")]
+        return annotated_body, tree_toc, total_diff_count, modified_sections
 
     @classmethod
     def validate_revisions_up_to_line(cls, text: str, commit_line: int) -> Tuple[str, int, int]:

@@ -156,16 +156,21 @@ class ArtifactBuilder:
         return "\n".join(rows) + "\n\n---\n\n"
 
     @classmethod
-    def clean_for_copy(cls, text: str) -> str:
+    def clean_for_copy(cls, text: str, source_file: Optional[str] = None, mode: str = "paper") -> str:
         """
         Nettoie et formate le texte pour le bloc dépliant prêt à copier :
-        - Déballe les polices LaTeX résiduelles (\\textsf, \\textbf, etc.)
-        - Supprime les balises et styles HTML (<span>, <style>, etc.)
-        - Supprime les commandes et environnements LaTeX résiduels
-        - Préserve les blocs KaTeX et le texte pur
+        - Pour les cibles virtuelles (virtual:draft_*) ou drafts non-LaTeX : préserve strictement le texte intégral sans altération (zéro strip LaTeX, zéro conversion de tirets CLI).
+        - Pour les manuscrits LaTeX (.tex) : déballe les polices résiduelles et supprime les balises HTML.
         """
         if not text:
             return ""
+
+        is_virtual = bool(source_file and str(source_file).startswith(("virtual:", "scratch:")))
+        is_tex = bool(source_file and str(source_file).lower().endswith(".tex"))
+
+        if is_virtual or (mode == "draft" and not is_tex and not text.strip().startswith(("\\section", "\\documentclass", "\\begin"))):
+            return text.strip()
+
         from .diff_engine import DiffEngine
         clean_text = DiffEngine.clean_residual_latex(text)
         return clean_text.strip()
@@ -213,7 +218,6 @@ class ArtifactBuilder:
         )
 
         doc_title = target_name.replace('_', ' ').upper()
-        exp_note = f">\n> 💬 **Note de révision :** {diff_explanation.strip()}\n>" if diff_explanation.strip() else ""
 
         # Le corps annoté est utilisé directement sans aucun badge IA
         processed_body = annotated_body
@@ -223,7 +227,6 @@ class ArtifactBuilder:
                 f"{cls.DIFF_SUMMARY_HEADER}\n\n"
                 f"> [!IMPORTANT]\n"
                 f"> **🌳 Arborescence des Modifications Détectées ({diff_count} deltas) :**\n"
-                f"{exp_note}\n"
                 f"> 📂 **{doc_title}**<br>\n"
                 f"{tree_toc}\n\n"
                 f"---\n\n"
@@ -233,7 +236,6 @@ class ArtifactBuilder:
                 f"## 📑 Structure & Sommaire AST du Manuscrit\n\n"
                 f"> [!NOTE]\n"
                 f"> **🌳 Arborescence des Sections AST (État Actuel) :**\n"
-                f"{exp_note}\n"
                 f"> 📂 **{doc_title}**<br>\n"
                 f"{tree_toc}\n\n"
                 f"---\n\n"
@@ -251,7 +253,7 @@ class ArtifactBuilder:
         # 4. Bloc dépliant de texte final prêt à copier (mode draft)
         copy_block = ""
         if mode == "draft" and final_content and final_content.strip():
-            clean_copy = cls.clean_for_copy(final_content)
+            clean_copy = cls.clean_for_copy(final_content, source_file=source_file, mode=mode)
             fence = cls.get_dynamic_fence(clean_copy, min_fence_len=4)
             copy_block = (
                 f"<details><summary>📋 Texte Final Prêt à Copier</summary>\n\n"
