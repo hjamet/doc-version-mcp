@@ -1062,9 +1062,14 @@ class DiffEngine:
 
         if t_old == 'image' and t_new == 'image':
             clean_img = u_new.strip()
+
+            def _clean_img_match(m):
+                clean_alt = re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))
+                return f"![{clean_alt}]({m.group(2)})"
+
             clean_img = re.sub(
                 r'!\[(.*?)\]\((.*?)\)',
-                lambda m: f"![{re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))}]({m.group(2)})",
+                _clean_img_match,
                 clean_img
             )
             return clean_img, 0, 0, 0, 0
@@ -1217,9 +1222,13 @@ class DiffEngine:
 
         diff_text = cls.sanitize_katex_in_diff(diff_text)
         diff_text = cls.sanitize_inline_code_in_diff(diff_text)
+        def _clean_img_match(m):
+            clean_alt = re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))
+            return f"![{clean_alt}]({m.group(2)})"
+
         diff_text = re.sub(
             r'!\[(.*?)\]\((.*?)\)',
-            lambda m: f"![{re.sub(r'</?(?:ins|del|span)\b[^>]*>', '', m.group(1))}]({m.group(2)})",
+            _clean_img_match,
             diff_text
         )
 

@@ -649,10 +649,11 @@ class LatexToMarkdownConverter:
             return [cell]
 
         def parse_single_tabular(raw_tab: str, caption: str = "") -> str:
-            clean = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', raw_tab)
-            clean = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|centering|small|footnotesize|scriptsize|label\{[^}]+\})', '', clean)
+            clean = self.preclean_markup(raw_tab)
+            clean = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', clean)
+            clean = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|centering|tiny|small|footnotesize|scriptsize|normalsize|large|appendix|label\{[^}]+\})', '', clean)
             clean = re.sub(r'\\addlinespace(?:\s*\[[^\]]*\])?', '', clean)
-            clean = re.sub(r'\\(?:rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', clean)
+            clean = re.sub(r'\\(?:rowcolor\b|columncolor\b|cellcolor\b|arrayrulecolor\b)(?:\[[^\]]*\])?(?:\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', clean)
             clean = re.sub(r'\\texttimes\b', '×', clean)
             clean = re.sub(r'\\checkmark\b', '✓', clean)
             clean = re.sub(r'\\ding\{51\}', '✓', clean)
@@ -765,8 +766,6 @@ class LatexToMarkdownConverter:
                     else:
                         img_blocks.append(f"![{cap_label}]({safe_name})")
                 imgs_str = "\n\n".join(img_blocks)
-                if clean_cap and clean_cap.lower() != "figure":
-                    return f"\n\n> [!NOTE] **🖼️ Figure : {clean_cap}**\n\n{imgs_str}\n\n"
                 return f"\n\n> [!NOTE] **🖼️ Figure**\n\n{imgs_str}\n\n"
 
             # Figure textuelle / diagramme (aucun includegraphics)
@@ -960,6 +959,40 @@ class LatexToMarkdownConverter:
         return text
 
     @classmethod
+    def preclean_markup(cls, text: str) -> str:
+        """
+        Nettoyage préventif fondamental AVANT tout traitement de maths, figures, tableaux et mise en page :
+        - Déballage de \\colorbox{bg}{content} -> [content]
+        - Déballage de \\textcolor{color}{content} -> content (y compris dans les maths et les légendes)
+        - Suppression propre de \\tiny, \\appendix et autres commandes de taille
+        """
+        if not text:
+            return ""
+
+        pattern_colorbox = re.compile(r'\\colorbox(?:\s*\[[^\]]*\])?\s*\{[^}]*\}\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}')
+        pattern_textcolor = re.compile(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}')
+
+        for _ in range(6):
+            changed = False
+            new_text = pattern_colorbox.sub(r'[\1]', text)
+            if new_text != text:
+                changed = True
+                text = new_text
+            new_text = pattern_textcolor.sub(r'\1', text)
+            if new_text != text:
+                changed = True
+                text = new_text
+            if not changed:
+                break
+
+        text = re.sub(
+            r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*',
+            '',
+            text
+        )
+        return text
+
+    @classmethod
     def unwrap_font_commands(cls, text: str, to_markdown: bool = True) -> str:
         """
         Déballe récursivement toutes les commandes de polices et formats LaTeX,
@@ -1099,7 +1132,7 @@ class LatexToMarkdownConverter:
                     continue
 
                 body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-                text = text[:m.start()] + f"\n\n{body}\n\n" + text[end_idx:]
+                text = text[:m.start()] + f"[{body}]" + text[end_idx:]
                 pos = m.start()
 
             # 3. \parbox[pos][height][inner-pos]{width}{content} -> content
@@ -1324,8 +1357,12 @@ class LatexToMarkdownConverter:
 
         env_names = r'(?:abstract|quote|quotation|verse)'
         def parse_quote(m):
+            env = m.group(1)
             lines = m.group(2).strip().splitlines()
-            return "\n\n" + "\n".join([f"> {l}" if l.strip() else ">" for l in lines]) + "\n\n"
+            quoted = "\n".join([f"> {l}" if l.strip() else ">" for l in lines])
+            if env == 'abstract':
+                return f"\n\n## Abstract\n\n{quoted}\n\n"
+            return "\n\n" + quoted + "\n\n"
 
         for _ in range(2):
             text = re.sub(rf'\\begin\{{({env_names})\}}(?:\[[^\]]*\])?(.*?)\\end\{{\1\}}', parse_quote, text, flags=re.DOTALL)
@@ -1416,6 +1453,7 @@ class LatexToMarkdownConverter:
         return text
 
     def clean_layout_formatting(self, text: str) -> str:
+        text = self.preclean_markup(text)
         text = self.strip_html_and_styles(text)
         text = self.convert_special_callouts(text)
         text = self.unwrap_boxes(text)
@@ -1434,7 +1472,7 @@ class LatexToMarkdownConverter:
         # 2. Polices et tailles de police
         text = re.sub(r'\\fontsize\{[^{}]*\}\{[^{}]*\}\s*(?:\\selectfont)?', '', text)
         text = re.sub(r'\\selectfont\b', '', text)
-        text = re.sub(r'\\(?:small|footnotesize|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b', '', text)
+        text = re.sub(r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', '', text)
         text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
 
         # 3. Espacements verticaux/horizontaux et règles de séparation
@@ -1455,13 +1493,14 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:linewidth|textwidth|columnwidth|paperwidth|paperheight)\b', '', text)
         text = re.sub(r'\\(?:fboxsep|fboxrule)\b', '', text)
         text = re.sub(r'\\definecolor\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:color\b|rowcolor\b|columncolor\b|cellcolor\b|arrayrulecolor\b)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace)\b', '', text)
         text = re.sub(r'\\keywords\s*\{.*?\}', '', text, flags=re.DOTALL)
         text = re.sub(r'\\and\b', ' • ', text)
         text = re.sub(r'\\(?:Statex|State|Require|Ensure|EndFor|EndIf|EndWhile)\b', '', text)
-        text = re.sub(r'\\textcolor(?:\[[^\]]*\])?\{[^{}]*\}\{((?:[^{}]|{[^{}]*})*)\}', r'\1', text)
+        for _ in range(5):
+            text = re.sub(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}', r'\1', text)
 
         # 5. Configuration et métadonnées parasites
         text = re.sub(r'\\titleformat\*?\{[^{}]*\}(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}(?:\[[^\]]*\])?', '', text)
@@ -1503,6 +1542,7 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\par\b', '\n\n', text)
         text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
         text = self.replace_shortstack(text)
+        text = self.preclean_markup(text)
 
         math_map = {}
         def repl_display(m):
@@ -1534,9 +1574,9 @@ class LatexToMarkdownConverter:
         text = text.replace(r'\{', '{').replace(r'\}', '}')
 
         text = BibTexParser.decode_latex_accents(text)
-        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|small|footnotesize|scriptsize|large|Large|LARGE|huge|Huge)\b[ \t]*', ' ', text)
+        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', ' ', text)
         text = re.sub(r'\\label\{[^}]+\}', '', text)
-        text = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
+        text = re.sub(r'\\(?:color\b|rowcolor\b|columncolor\b|cellcolor\b|arrayrulecolor\b)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace)\b', '', text)
         text = re.sub(r'\\keywords\s*\{.*?\}', '', text, flags=re.DOTALL)
@@ -1643,8 +1683,9 @@ class LatexToMarkdownConverter:
         text_no_comments = self.strip_comments(raw_text)
         text_no_macros, self.macros = LatexMacroEngine.extract_macros(text_no_comments)
         text_expanded = LatexMacroEngine.expand_macros(text_no_macros, self.macros) if self.macros else text_no_comments
+        text_precleaned = self.preclean_markup(text_expanded)
 
-        body = self.extract_metadata(text_expanded)
+        body = self.extract_metadata(text_precleaned)
         body = self.convert_math(body)
         body = self.convert_citations(body)
         body = self.convert_figures(body)
@@ -1667,6 +1708,9 @@ class LatexToMarkdownConverter:
         if self.keywords and "**Mots-clés :**" not in body:
             doc_parts.append(f"**Mots-clés :** {self.keywords}\n")
 
+        if self.abstract and "## Abstract" not in body and self.abstract not in body:
+            doc_parts.append(f"## Abstract\n\n{self.abstract}\n")
+
         doc_parts.append(body)
 
         if self.cited_keys:
@@ -1679,13 +1723,14 @@ class LatexToMarkdownConverter:
         final_md = self.strip_html_and_styles(final_md)
         final_md = self.unwrap_font_commands(final_md, to_markdown=True)
         final_md = re.sub(r'\\(?:bibliographystyle|bibliography)\s*(?:\{[^}]*\}|[a-zA-Z0-9_\-]+)?', '', final_md)
-        final_md = re.sub(r'\\(?:color|rowcolor|columncolor|cellcolor|arrayrulecolor)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', final_md)
+        final_md = re.sub(r'\\(?:color\b|rowcolor\b|columncolor\b|cellcolor\b|arrayrulecolor\b)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', final_md)
         final_md = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', final_md)
         final_md = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace)\b', '', final_md)
         final_md = re.sub(r'\\keywords\s*\{.*?\}', '', final_md, flags=re.DOTALL)
         final_md = re.sub(r'\\and\b', ' • ', final_md)
         final_md = re.sub(r'\\(?:Statex|State|Require|Ensure|EndFor|EndIf|EndWhile)\b', '', final_md)
         final_md = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', final_md)
+        final_md = re.sub(r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', '', final_md)
         final_md = re.sub(r'\*\*\}([ \t]*)', '** ', final_md)
         final_md = re.sub(r'\*\}\b', '* ', final_md)
         final_md = re.sub(r'`\}([ \t]*)', '` ', final_md)

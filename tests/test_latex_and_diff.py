@@ -477,5 +477,27 @@ Third concluding paragraph.
     assert "Third concluding paragraph." in annotated
 
 
+def test_latex_gap_badges_textcolor_math_and_appendix():
+    r"""
+    Vérifie le déballage de \colorbox/\textcolor, la suppression de \tiny et \appendix
+    et le nettoyage des macros de badge dans les tableaux, les maths et le corps.
+    """
+    latex_input = r"""
+\newcommand{\gapbadge}[3]{\colorbox{#1}{\textcolor{#2}{\textsf{\textbf{\tiny #3}}}}}
+\newcommand{\gapPKG}{\gapbadge{blue!12}{blue!75!black}{PKG}}
+
+Reporting $\textcolor{red}{N = 48}$ completed courses across \gapPKG.
+
+\appendix
+\section{Supplementary Materials}
+"""
+    res = LatexToMarkdownConverter.convert_text(latex_input)
+    assert "[**PKG**]" in res
+    assert "box{" not in res
+    assert r"\tiny" not in res
+    assert r"\textcolor" not in res
+    assert r"\appendix" not in res
+    assert "$N = 48$" in res
+    assert "## Supplementary Materials" in res
 
 
