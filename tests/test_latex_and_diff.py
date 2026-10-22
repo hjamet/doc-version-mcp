@@ -164,7 +164,7 @@ Baseline & 0.421 & 0.650 & 0.310 & 0.280 \\
 
     conv = LatexToMarkdownConverter.convert_text(expanded)
     assert r"\cmidrule" not in conv
-    assert "Values in red indicate" in conv
+    assert 'Values in <span style="color:#e11d48;font-weight:600">red</span> indicate' in conv
     assert "Values in redindicate" not in conv
     assert "| Baseline | 0.421 | 0.650 | 0.310 | 0.280 |" in conv
 
@@ -495,9 +495,9 @@ Reporting $\textcolor{red}{N = 48}$ completed courses across \gapPKG.
     assert "[**PKG**]" in res
     assert "box{" not in res
     assert r"\tiny" not in res
-    assert r"\textcolor" not in res
+    assert r"blue!75!black" not in res
     assert r"\appendix" not in res
-    assert "$N = 48$" in res
+    assert r"$\textcolor{red}{N = 48}$" in res
     assert "## Supplementary Materials" in res
 
 

@@ -346,7 +346,7 @@ class LatexToMarkdownConverter:
             temp_line = line.replace(r'\%', escaped_marker)
             if '%' in temp_line:
                 temp_line = temp_line.split('%', 1)[0]
-            temp_line = temp_line.replace(escaped_marker, r'%')
+            temp_line = temp_line.replace(escaped_marker, r'\%')
             lines.append(temp_line)
         return "\n".join(lines)
 
@@ -751,7 +751,9 @@ class LatexToMarkdownConverter:
                     full_fig = re.sub(rf'\\end\{{{inner_box_matched}\}}', '', full_fig)
 
             clean_cap = self.clean_inline_formatting(caption).strip() if caption else ""
+            clean_cap, cap_math = self.mask_math(clean_cap)
             clean_cap = re.sub(r'[\{\}]', '', clean_cap)
+            clean_cap = self.unmask_math(clean_cap, cap_math)
 
             img_matches = list(re.finditer(r'\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}', full_fig))
             if img_matches:
@@ -857,10 +859,28 @@ class LatexToMarkdownConverter:
     def strip_html_and_styles(cls, text: str) -> str:
         """
         Élimine rigoureusement et récursivement tout fragment HTML parasite :
-        <style>...</style>, <span>...</span>, balises fermantes orphelines, et attributs style="...".
+        <style>...</style>, <span>...</span> (sauf le span rouge de \\textcolor{red}), balises fermantes orphelines, et attributs style="...".
         """
         if not text:
             return ""
+        # 0. Protection des spans rouges légitimes issus de \textcolor{red}{...}
+        red_spans: Dict[str, str] = {}
+        def _protect_red_span(m: re.Match) -> str:
+            tok = f"___PROTECTED_RED_SPAN_{len(red_spans)}___"
+            red_spans[tok] = m.group(0)
+            return tok
+
+        for _ in range(4):
+            prev_t = text
+            text = re.sub(
+                r'<span style="color:#e11d48;font-weight:600">((?:(?!</?span\b).)*?)</span>',
+                _protect_red_span,
+                text,
+                flags=re.DOTALL
+            )
+            if text == prev_t:
+                break
+
         # 1. Élimination complète des blocs <style>...</style>
         text = re.sub(r'<style\b[^>]*>.*?</style>', '', text, flags=re.DOTALL)
         # 2. Déballage récursif de toutes les balises <span> (diff, couleurs, etc.)
@@ -880,12 +900,15 @@ class LatexToMarkdownConverter:
         text = re.sub(r'</?(?:span|style|font|div)\b[^>]*>', '', text)
         # 5. Suppression de tout attribut style="..." résiduel
         text = re.sub(r'\s*style="[^"]*"', '', text)
+        # 6. Restauration des spans rouges légitimes
+        for tok, val in reversed(list(red_spans.items())):
+            text = text.replace(tok, val)
         return text
 
     @classmethod
     def convert_special_callouts(cls, text: str) -> str:
         """
-        Convertit les macros de callouts scientifiques (acmcallout, rqbox, formaldef)
+        Convertit les macros de callouts scientifiques (acmcallout, rqbox, formaldef, fbox+parbox)
         en blocs Markdown natifs clairs même si les \\newcommand ne sont pas présents.
         """
         if not text:
@@ -956,6 +979,34 @@ class LatexToMarkdownConverter:
                 + text[idx1:]
             )
 
+        # 4. \noindent\fbox{\parbox{width}{Body}} ou \fbox{\parbox{width}{Body}} -> > [!IMPORTANT]
+        pattern_fbox_parbox = re.compile(r'(?:\\noindent\s*)?\\fbox\s*\{')
+        pos = 0
+        while True:
+            m = pattern_fbox_parbox.search(text, pos)
+            if not m:
+                break
+            fbox_inner, end_fbox = LatexMacroEngine.extract_braced_group(text, m.end() - 1)
+            m_pb = re.match(r'^\s*\\parbox(?:\s*\[[^\]]*\])*\s*\{', fbox_inner, flags=re.DOTALL)
+            if m_pb:
+                _, after_width = LatexMacroEngine.extract_braced_group(fbox_inner, m_pb.end() - 1)
+                m_ws = re.match(r'\s*', fbox_inner[after_width:])
+                body_open = after_width + (m_ws.end() if m_ws else 0)
+                if body_open < len(fbox_inner) and fbox_inner[body_open] == '{':
+                    pb_body, _ = LatexMacroEngine.extract_braced_group(fbox_inner, body_open)
+                    pb_body = re.sub(
+                        r'^\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large)\b\s*',
+                        '',
+                        pb_body.strip()
+                    )
+                    lines = [l.strip() for l in pb_body.strip().splitlines() if l.strip()]
+                    joined_body = " ".join(lines)
+                    replacement = f"\n\n> [!IMPORTANT]\n> {joined_body}\n\n"
+                    text = text[:m.start()] + replacement + text[end_fbox:]
+                    pos = m.start() + len(replacement)
+                    continue
+            pos = m.end()
+
         return text
 
     @classmethod
@@ -963,14 +1014,17 @@ class LatexToMarkdownConverter:
         """
         Nettoyage préventif fondamental AVANT tout traitement de maths, figures, tableaux et mise en page :
         - Déballage de \\colorbox{bg}{content} -> [content]
-        - Déballage de \\textcolor{color}{content} -> content (y compris dans les maths et les légendes)
+        - Déballage de \\textcolor{color}{content} -> content (sauf \\textcolor{red}{...} qui est préservé)
         - Suppression propre de \\tiny, \\appendix et autres commandes de taille
         """
         if not text:
             return ""
 
         pattern_colorbox = re.compile(r'\\colorbox(?:\s*\[[^\]]*\])?\s*\{[^}]*\}\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}')
-        pattern_textcolor = re.compile(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}')
+        pattern_textcolor = re.compile(
+            r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?!\{\s*red\s*\})(?:\{[^{}]*\}|\s*(?!red\b)[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}',
+            re.IGNORECASE
+        )
 
         for _ in range(6):
             changed = False
@@ -1002,14 +1056,19 @@ class LatexToMarkdownConverter:
             return ""
 
         # 1. Commandes de couleur avec corps: \textcolor{...}{body} ou \textcolor[...]{...}{body}
-        pattern_textcolor = re.compile(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{')
+        pattern_textcolor = re.compile(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{([^{}]*)\}|\s*([a-zA-Z0-9!_]+))\s*\{')
         while True:
             m = pattern_textcolor.search(text)
             if not m:
                 break
+            color_name = (m.group(1) or m.group(2) or "").strip().lower()
             open_brace = m.end() - 1
             inner, end_idx = LatexMacroEngine.extract_braced_group(text, open_brace)
-            text = text[:m.start()] + inner + text[end_idx:]
+            if color_name == "red" and to_markdown:
+                replacement = f'<span style="color:#e11d48;font-weight:600">{inner}</span>'
+            else:
+                replacement = inner
+            text = text[:m.start()] + replacement + text[end_idx:]
 
         # 2. Commandes de polices inline
         cmd_map = {
@@ -1200,8 +1259,8 @@ class LatexToMarkdownConverter:
                 text = text[:m.start()] + f" {body} " + text[end_idx:]
                 pos = m.start()
 
-            # 5. \makebox / \framebox
-            pattern_box = re.compile(r'\\(?:makebox|framebox)(?:\s*\[[^\]]*\])*\s*\{')
+            # 5. \makebox / \framebox / \fbox
+            pattern_box = re.compile(r'\\(?:makebox|framebox|fbox)(?:\s*\[[^\]]*\])*\s*\{')
             pos = 0
             while True:
                 m = pattern_box.search(text, pos)
@@ -1341,6 +1400,7 @@ class LatexToMarkdownConverter:
 
     def convert_environments(self, text: str) -> str:
         """Convertit minipage, abstract, quote, tcolorbox, center, algorithm et environnements personnalisés."""
+        text = self.convert_special_callouts(text)
         text = self.unwrap_boxes(text)
         text = self.convert_algorithms(text)
 
@@ -1500,7 +1560,12 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\and\b', ' • ', text)
         text = re.sub(r'\\(?:Statex|State|Require|Ensure|EndFor|EndIf|EndWhile)\b', '', text)
         for _ in range(5):
-            text = re.sub(r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?:\{[^{}]*\}|\s*[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}', r'\1', text)
+            text = re.sub(
+                r'\\textcolor(?:\s*\[[^\]]*\])?\s*(?!\{\s*red\s*\})(?:\{[^{}]*\}|\s*(?!red\b)[a-zA-Z0-9!_]+)\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}',
+                r'\1',
+                text,
+                flags=re.IGNORECASE
+            )
 
         # 5. Configuration et métadonnées parasites
         text = re.sub(r'\\titleformat\*?\{[^{}]*\}(?:\[[^\]]*\])?\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}(?:\[[^\]]*\])?', '', text)
