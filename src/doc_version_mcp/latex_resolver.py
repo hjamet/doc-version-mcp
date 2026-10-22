@@ -761,7 +761,7 @@ class LatexToMarkdownConverter:
                 for im in img_matches:
                     raw_p = im.group(1).strip().strip('"{}\'')
                     safe_name = self.resolve_image_path(raw_p)
-                    cap_label = clean_cap or "Figure"
+                    cap_label = clean_cap.replace('[', '(').replace(']', ')') if clean_cap else "Figure"
                     if self.brain_dir and self.brain_dir.is_dir():
                         b_posix = self.brain_dir.resolve().as_posix().lstrip('/')
                         img_blocks.append(f"![{cap_label}](file:///{b_posix}/{safe_name})")
