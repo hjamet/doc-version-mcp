@@ -870,6 +870,15 @@ class LatexToMarkdownConverter:
             red_spans[tok] = m.group(0)
             return tok
 
+        # 0.bis Protection des balises d'arbitrage <XXX ...>
+        xxx_tags: Dict[str, str] = {}
+        def _protect_xxx(m: re.Match) -> str:
+            tok = f"___PROTECTED_XXX_ARBITRATION_{len(xxx_tags)}___"
+            xxx_tags[tok] = m.group(0)
+            return tok
+
+        text = re.sub(r'<XXX\b[^>]*>', _protect_xxx, text)
+
         for _ in range(4):
             prev_t = text
             text = re.sub(
@@ -902,6 +911,9 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\s*style="[^"]*"', '', text)
         # 6. Restauration des spans rouges légitimes
         for tok, val in reversed(list(red_spans.items())):
+            text = text.replace(tok, val)
+        # 7. Restauration des balises d'arbitrage <XXX ...>
+        for tok, val in xxx_tags.items():
             text = text.replace(tok, val)
         return text
 

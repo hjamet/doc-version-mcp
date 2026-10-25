@@ -18,6 +18,7 @@ from fastmcp import FastMCP
 from .cas_engine import CASEngine
 from .diff_engine import DiffEngine
 from .latex_resolver import LatexToMarkdownConverter, BibTexParser
+from .html_resolver import HtmlToMarkdownConverter, is_html_doc
 from .draft_engine import DraftEngine
 from .artifact_builder import ArtifactBuilder
 from .style_guard import check_style, run_preservation_validator
@@ -428,9 +429,16 @@ def get_diff_artifact(
         if not old_text:
             old_text = new_text
 
-        # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou contenu LaTeX détecté
         b_dir = Path(brain_dir) if brain_dir else None
 
+        # Normalisation automatique HTML -> Markdown propre si fichier .html/.htm ou contenu HTML détecté
+        if is_html_doc(old_text, target_path):
+            old_text = HtmlToMarkdownConverter.convert_text(old_text, base_dir=base_dir, brain_dir=b_dir)
+
+        if is_html_doc(new_text, target_path):
+            new_text = HtmlToMarkdownConverter.convert_text(new_text, base_dir=base_dir, brain_dir=b_dir)
+
+        # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou contenu LaTeX détecté
         def is_latex_doc(t: str) -> bool:
             if not t:
                 return False

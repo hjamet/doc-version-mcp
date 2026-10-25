@@ -3,6 +3,7 @@ test_latex_and_diff.py — Tests ciblés pour les filtres LaTeX et le mode block
 """
 
 import re
+from pathlib import Path
 import pytest
 
 from doc_version_mcp.diff_engine import DiffEngine
@@ -499,5 +500,139 @@ Reporting $\textcolor{red}{N = 48}$ completed courses across \gapPKG.
     assert r"\appendix" not in res
     assert r"$\textcolor{red}{N = 48}$" in res
     assert "## Supplementary Materials" in res
+
+
+def test_html_to_markdown_converter_and_diff_artifact(tmp_path):
+    """
+    Vérifie l'extraction HTML structurée en Markdown (h1, p, ul/li, table, strong/em,
+    balises non-éditoriales ignorées, conservation des balises d'arbitrage <XXX...>)
+    et l'intégration de bout en bout dans get_diff_artifact sur cible .html.
+    """
+    from doc_version_mcp.html_resolver import HtmlToMarkdownConverter, is_html_doc
+    from doc_version_mcp.server import get_diff_artifact
+    import json
+
+    html_v1 = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <title>Titre non éditorial</title>
+    <style>.hidden { display: none; }</style>
+    <script>console.log("script");</script>
+</head>
+<body>
+    <nav class="toc">Menu de navigation à ignorer</nav>
+    <h1>Règles Générales du Jeu</h1>
+    <p>Bienvenue dans le <strong>système de combat</strong> d'<em>Asharde</em>.</p>
+    <p>&lt;XXX à trancher : Choix entre jet de sauvegarde D20 ou réserve de dés&gt;</p>
+    <ul>
+        <li>Action principale</li>
+        <li>Action bonus</li>
+    </ul>
+    <table>
+        <thead>
+            <tr><th>Attribut</th><th>Modificateur</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Force</td><td>+2</td></tr>
+            <tr><td>Dextérité</td><td>+1</td></tr>
+        </tbody>
+    </table>
+</body>
+</html>"""
+
+    html_v2 = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <title>Titre non éditorial mis à jour</title>
+    <style>.hidden { display: none; }</style>
+</head>
+<body>
+    <h1>Règles Générales du Jeu</h1>
+    <p>Bienvenue dans le <strong>système tactique et de combat</strong> d'<em>Asharde</em> révisé.</p>
+    <p>&lt;XXX à trancher : Choix entre jet de sauvegarde D20 ou réserve de dés&gt;</p>
+    <ul>
+        <li>Action principale révisée</li>
+        <li>Action bonus</li>
+        <li>Réaction rapide</li>
+    </ul>
+    <table>
+        <thead>
+            <tr><th>Attribut</th><th>Modificateur</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Force</td><td>+3</td></tr>
+            <tr><td>Dextérité</td><td>+1</td></tr>
+        </tbody>
+    </table>
+</body>
+</html>"""
+
+    # 1. Vérification de la conversion unitaire
+    md_v1 = HtmlToMarkdownConverter.convert_text(html_v1)
+    assert "# Règles Générales du Jeu" in md_v1
+    assert "Titre non éditorial" not in md_v1
+    assert "console.log" not in md_v1
+    assert "Menu de navigation" not in md_v1
+    assert "**système de combat**" in md_v1
+    assert "*Asharde*" in md_v1
+    assert "<XXX à trancher : Choix entre jet de sauvegarde D20 ou réserve de dés>" in md_v1
+    assert "- Action principale" in md_v1
+    assert "- Action bonus" in md_v1
+    assert "| Attribut | Modificateur |" in md_v1
+    assert "| :--- | :--- |" in md_v1 or "| :---" in md_v1
+    assert "| Force | +2 |" in md_v1
+
+    # 2. Vérification de is_html_doc
+    assert is_html_doc(html_v1) is True
+    assert is_html_doc("Just plain text", tmp_path / "rules.html") is True
+    assert is_html_doc("Just plain text", tmp_path / "rules.md") is False
+
+    # 3. Test de bout en bout avec get_diff_artifact sur cible .html
+    html_file = tmp_path / "rules.html"
+    html_file.write_text(html_v2, encoding="utf-8")
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+
+    res_json_str = get_diff_artifact(
+        target=str(html_file),
+        from_commit_id="",
+        to_commit_id="",
+        content=html_v2,
+        diff_explanation="Mise à jour du système tactique",
+        brain_dir=str(brain_dir),
+        language="fr",
+        return_content=True
+    )
+    res_data = json.loads(res_json_str)
+    assert res_data["status"] == "success"
+    assert "artifact_content" in res_data
+    art_content = res_data["artifact_content"]
+
+    # La balise <XXX...> doit être préservée intacte dans l'artéfact
+    assert "<XXX à trancher : Choix entre jet de sauvegarde D20 ou réserve de dés>" in art_content
+    assert "# Règles Générales du Jeu" in art_content
+    saved_path = res_data["saved_artifact_path"]
+    assert saved_path and Path(saved_path).exists()
+
+    # 4. Test d'image locale avec copie dans brain_dir et balise littérale <XXX ...>
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    img_sample = assets_dir / "diagram.png"
+    img_sample.write_bytes(b"\x89PNG\r\n\x1a\nfakeimagebytes")
+
+    html_with_img = f"""<div>
+    <h2>Diagramme</h2>
+    <img src="assets/diagram.png" alt="Schéma Tactique" />
+    <p><XXX à trancher : Valeur d'armure naturelle></p>
+    </div>"""
+
+    md_img = HtmlToMarkdownConverter.convert_text(html_with_img, base_dir=tmp_path, brain_dir=brain_dir)
+    assert "## Diagramme" in md_img
+    assert "![Schéma Tactique]" in md_img
+    assert "diagram.png" in md_img
+    assert "<XXX à trancher : Valeur d'armure naturelle>" in md_img
+    assert (brain_dir / "diagram.png").exists()
+
 
 
