@@ -1038,9 +1038,16 @@ class LatexToMarkdownConverter:
             re.IGNORECASE
         )
 
+        def _sub_colorbox(match: re.Match) -> str:
+            body = match.group(1)
+            stripped = body.strip()
+            if '\n' not in body and '\\par' not in body and len(stripped) <= 30:
+                return f"[{stripped}]"
+            return body
+
         for _ in range(6):
             changed = False
-            new_text = pattern_colorbox.sub(r'[\1]', text)
+            new_text = pattern_colorbox.sub(_sub_colorbox, text)
             if new_text != text:
                 changed = True
                 text = new_text
@@ -1051,6 +1058,7 @@ class LatexToMarkdownConverter:
             if not changed:
                 break
 
+        text = re.sub(r'\\looseness\s*=\s*-?\d+', '', text)
         text = re.sub(
             r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*',
             '',
@@ -1203,7 +1211,12 @@ class LatexToMarkdownConverter:
                     continue
 
                 body, end_idx = LatexMacroEngine.extract_braced_group(text, idx)
-                text = text[:m.start()] + f"[{body}]" + text[end_idx:]
+                stripped = body.strip()
+                if '\n' not in body and '\\par' not in body and len(stripped) <= 30:
+                    box_repr = f"[{stripped}]"
+                else:
+                    box_repr = body
+                text = text[:m.start()] + box_repr + text[end_idx:]
                 pos = m.start()
 
             # 3. \parbox[pos][height][inner-pos]{width}{content} -> content
@@ -1555,6 +1568,8 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\needspace(?:\{[^{}]*\}|\[[^\]]*\])?', '', text)
         text = re.sub(r'\\(?:setlength|addtolength)\{[^{}]*\}\{[^{}]*\}', '', text)
         text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\looseness\s*=\s*-?\d+', '', text)
+        text = re.sub(r'\\(?:emergencystretch|tolerance|pretolerance|clubpenalty|widowpenalty)\s*(?:=\s*)?-?\d+(?:\.[0-9]+)?(?:pt|em|ex|cm|mm|in)?', '', text)
 
         # 4. Règles, boîtes, couleurs et dimensions
         text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
