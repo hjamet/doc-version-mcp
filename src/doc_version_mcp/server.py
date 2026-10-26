@@ -22,7 +22,7 @@ from .html_resolver import HtmlToMarkdownConverter, is_html_doc
 from .draft_engine import DraftEngine
 from .artifact_builder import ArtifactBuilder
 from .style_guard import check_style, run_preservation_validator, detect_language
-from .stealth_bridge import apply_stealth_to_modified_prose
+from .stealth_bridge import apply_stealth_to_modified_prose, format_stealth_callout
 
 
 # Instanciation du serveur FastMCP
@@ -257,7 +257,7 @@ def get_diff_artifact(
     context_mode: str = "general",
     return_content: bool = False,
     block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD,
-    run_stealth: bool = False
+    run_stealth: Optional[bool] = None
 ) -> str:
 
     """
@@ -427,34 +427,54 @@ def get_diff_artifact(
                     old_text = head_text if head_text is not None else ""
                     baseline_commit_id = latest_git_id[:8]
 
-        # Réécriture StealthRL optionnelle (opt-in via run_stealth=True, désactivée par défaut)
+        # Si old_text n'a pas été trouvé dans le CAS/Git mais existe sur disque et diffère de content
+        if not old_text and disk_content is not None and content and disk_content.strip() != content.strip():
+            old_text = disk_content
+
+        # Réécriture StealthRL optionnelle (par défaut activée si mode == 'paper' hors suite pytest automatique)
+        should_run_stealth = run_stealth if run_stealth is not None else (mode == "paper" and not os.environ.get("PYTEST_CURRENT_TEST"))
         stealth_report: Dict[str, Any] = {"applied": False}
         parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
         if not to_commit_id and new_text.strip():
             from_disk = not content and disk_content is not None
-            if run_stealth:
+            if should_run_stealth:
                 stealth_lang = detect_language(new_text) if language == "auto" else language
                 if stealth_lang == "fr":
                     stealth_report = {"applied": False, "reason": "StealthRL (Qwen3-4B, prompts et NLI anglais) non appliqué à un texte français"}
                 else:
+                    pre_snap = cas.create_snapshot(
+                        target=str(target_path) if (from_disk and target_path) else target,
+                        message=diff_explanation[:120] if diff_explanation else "Pré-StealthRL (avant obfuscation)",
+                        author="agent",
+                        content=None if from_disk else new_text,
+                        mode=mode
+                    )
+                    pre_snap_id = pre_snap["commit_id"]
+                    stealth_report["pre_commit_id"] = pre_snap_id
+
                     rewritten, stealth_report = apply_stealth_to_modified_prose(
                         old_raw=old_text, new_raw=new_text, target_path=target_path,
                         language=language, context_mode=context_mode, allowed_terms=parsed_allowed
                     )
                     stealth_report["applied"] = True
-                    if rewritten != new_text:
+                    stealth_report["pre_commit_id"] = pre_snap_id
+
+                    if rewritten != new_text and stealth_report.get("segments_rewritten", 0) > 0:
                         new_text = rewritten
                         if from_disk and target_path:
                             target_path.write_text(new_text, encoding="utf-8")
-                        snap = cas.create_snapshot(
+                        post_snap = cas.create_snapshot(
                             target=str(target_path) if from_disk else target,
-                            message=f"StealthRL auto-rewrite ({stealth_report['segments_rewritten']}/{stealth_report['segments_modified']} segments)",
+                            message=f"Post-StealthRL auto-rewrite ({stealth_report['segments_rewritten']}/{stealth_report['segments_modified']} segments)",
                             author="agent",
                             content=None if from_disk else new_text,
                             mode=mode
                         )
-                        stealth_report["snapshot_commit_id"] = snap["commit_id"]
+                        stealth_report["post_commit_id"] = post_snap["commit_id"]
+                        stealth_report["snapshot_commit_id"] = post_snap["commit_id"]
                         stealth_report["written_to_disk"] = from_disk
+                    elif pre_snap_id:
+                        stealth_report["snapshot_commit_id"] = pre_snap_id
             elif old_text and new_text.strip() != old_text.strip():
                 snap = cas.create_snapshot(
                     target=str(target_path) if (from_disk and target_path) else target,
@@ -577,6 +597,17 @@ def get_diff_artifact(
             repo_root=repo_root,
             upstream_id=get_git_upstream_commit(repo_root) if repo_root else None
         )
+
+        # Injection du bloc d'obfuscation StealthRL dans l'en-tête du diff
+        if stealth_report.get("applied") and stealth_report.get("segments_rewritten", 0) > 0:
+            callout_str = format_stealth_callout(stealth_report)
+            meta_match = re.match(r'^((?:---\n.*?\n---\n*)?(?:<!--.*?-->\n*)+)', artifact_content, re.DOTALL)
+            if meta_match:
+                hdr_part = meta_match.group(1).rstrip() + "\n\n"
+                tail_part = artifact_content[meta_match.end():].lstrip()
+                artifact_content = f"{hdr_part}{callout_str}{tail_part}"
+            else:
+                artifact_content = f"{callout_str}{artifact_content}"
 
         # Sauvegarde sur disque : brain_dir si fourni, sinon répertoire temporaire dédié
         saved_path = None
@@ -939,6 +970,8 @@ def main():
         p_diff.add_argument("--mode", default="paper", choices=["paper", "draft"], help="Operating mode")
         p_diff.add_argument("--brain-dir", default="", help="Brain directory to write artifact")
         p_diff.add_argument("--artifact-name", default="", help="Base name of output artifact")
+        p_diff.add_argument("--run-stealth", dest="run_stealth", action="store_true", default=None, help="Force execution of StealthRL")
+        p_diff.add_argument("--no-run-stealth", dest="run_stealth", action="store_false", help="Disable StealthRL")
 
         # restore
         p_restore = subparsers.add_parser("restore", help="Restore snapshot from CAS")
@@ -969,7 +1002,7 @@ def main():
                 c = Path(args.content_file).read_text(encoding="utf-8", errors="replace")
             elif args.content:
                 c = args.content
-            print(get_diff_artifact(target=args.target, diff_explanation=args.explanation, content=c, from_commit_id=args.from_commit, to_commit_id=args.to_commit, mode=args.mode, brain_dir=args.brain_dir, artifact_name=args.artifact_name))
+            print(get_diff_artifact(target=args.target, diff_explanation=args.explanation, content=c, from_commit_id=args.from_commit, to_commit_id=args.to_commit, mode=args.mode, brain_dir=args.brain_dir, artifact_name=args.artifact_name, run_stealth=args.run_stealth))
         elif args.subcommand == "restore":
             print(restore_commit(commit_id=args.commit_id, target=args.target, dry_run=args.dry_run))
         elif args.subcommand == "prune":
