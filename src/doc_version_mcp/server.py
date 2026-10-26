@@ -21,7 +21,8 @@ from .latex_resolver import LatexToMarkdownConverter, BibTexParser
 from .html_resolver import HtmlToMarkdownConverter, is_html_doc
 from .draft_engine import DraftEngine
 from .artifact_builder import ArtifactBuilder
-from .style_guard import check_style, run_preservation_validator
+from .style_guard import check_style, run_preservation_validator, detect_language
+from .stealth_bridge import apply_stealth_to_modified_prose
 
 
 # Instanciation du serveur FastMCP
@@ -255,7 +256,8 @@ def get_diff_artifact(
     allowed_terms: str = "",
     context_mode: str = "general",
     return_content: bool = False,
-    block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD
+    block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD,
+    run_stealth: bool = False
 ) -> str:
 
     """
@@ -425,6 +427,44 @@ def get_diff_artifact(
                     old_text = head_text if head_text is not None else ""
                     baseline_commit_id = latest_git_id[:8]
 
+        # Réécriture StealthRL optionnelle (opt-in via run_stealth=True, désactivée par défaut)
+        stealth_report: Dict[str, Any] = {"applied": False}
+        parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
+        if not to_commit_id and new_text.strip():
+            from_disk = not content and disk_content is not None
+            if run_stealth:
+                stealth_lang = detect_language(new_text) if language == "auto" else language
+                if stealth_lang == "fr":
+                    stealth_report = {"applied": False, "reason": "StealthRL (Qwen3-4B, prompts et NLI anglais) non appliqué à un texte français"}
+                else:
+                    rewritten, stealth_report = apply_stealth_to_modified_prose(
+                        old_raw=old_text, new_raw=new_text, target_path=target_path,
+                        language=language, context_mode=context_mode, allowed_terms=parsed_allowed
+                    )
+                    stealth_report["applied"] = True
+                    if rewritten != new_text:
+                        new_text = rewritten
+                        if from_disk and target_path:
+                            target_path.write_text(new_text, encoding="utf-8")
+                        snap = cas.create_snapshot(
+                            target=str(target_path) if from_disk else target,
+                            message=f"StealthRL auto-rewrite ({stealth_report['segments_rewritten']}/{stealth_report['segments_modified']} segments)",
+                            author="agent",
+                            content=None if from_disk else new_text,
+                            mode=mode
+                        )
+                        stealth_report["snapshot_commit_id"] = snap["commit_id"]
+                        stealth_report["written_to_disk"] = from_disk
+            elif old_text and new_text.strip() != old_text.strip():
+                snap = cas.create_snapshot(
+                    target=str(target_path) if (from_disk and target_path) else target,
+                    message=diff_explanation[:120] if diff_explanation else "Révision chirurgicale (sans StealthRL)",
+                    author="agent",
+                    content=None if from_disk else new_text,
+                    mode=mode
+                )
+                stealth_report["snapshot_commit_id"] = snap["commit_id"]
+
         # Si pas d'ancienne version, considérer baseline vide ou identique
         if not old_text:
             old_text = new_text
@@ -473,7 +513,6 @@ def get_diff_artifact(
         soft_warnings = []
         style_verdict = "PASS"
         if new_text and new_text.strip():
-            parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
             style_res = check_style(new_text, language=language, context_mode=context_mode, allowed_terms=parsed_allowed)
             style_verdict = style_res.verdict
             if style_res.verdict == "FAIL":
@@ -616,7 +655,8 @@ def get_diff_artifact(
             "soft_warnings_count": len(soft_warnings),
             "soft_warnings": soft_warnings,
             "issues": issues_list,
-            "issues_count": len(issues_list)
+            "issues_count": len(issues_list),
+            "stealth_rewrite": stealth_report
         }
 
         if 'style_res' in locals() and style_res.stylometric_warnings:
