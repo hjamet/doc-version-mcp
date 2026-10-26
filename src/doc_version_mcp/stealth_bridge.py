@@ -2,7 +2,7 @@
 stealth_bridge.py — Réécriture automatique StealthRL des paragraphes de prose modifiés avant génération d'un diff.
 
 Le moteur `stealth_rewriter.py` (Qwen3-4B-Instruct-2507 + LoRA StealthRL, GPU CUDA) s'exécute dans un interpréteur
-Python disposant de torch CUDA ou via un démon local persistant (--serve sur http://127.0.0.1:18765) :
+Python disposant de torch CUDA ou via un démon local persistant (--serve sur http://127.0.0.1:18777) :
 - DOC_VERSION_STEALTH_SCRIPT : chemin absolu de stealth_rewriter.py.
 - STEALTH_PYTHON_EXE / DOC_VERSION_STEALTH_PYTHON : interpréteur Python CUDA explicite.
 - Sondage ordonné et mise en cache mémoire + disque pour une résolution en < 0.1 ms.
@@ -43,10 +43,10 @@ _RUNTIME_CACHE: Optional[Tuple[str, Path]] = None
 _CACHE_FILE = Path(tempfile.gettempdir()) / "doc_version_stealth_runtime_v1.json"
 
 PREFERRED_CUDA_CANDIDATES = [
+    Path(r"C:\Users\Jamet\.pyenv\pyenv-win\versions\3.12.3\python.exe"),
     Path.home() / "AppData/Local/Programs/Python/Python312/python.exe",
     Path(r"C:\Users\Jamet\AppData\Local\Programs\Python\Python312\python.exe"),
     Path(r"C:\Users\hjamet\AppData\Local\Programs\Python\Python312\python.exe"),
-    Path(r"C:\Users\Jamet\.pyenv\pyenv-win\versions\3.12.3\python.exe"),
     Path(r"C:\Users\Jamet\.pyenv\pyenv-win\versions\3.11.9\python.exe"),
 ]
 
@@ -57,7 +57,7 @@ DEFAULT_SCRIPT_CANDIDATES = [
 ]
 
 DEFAULT_DAEMON_HOST = "127.0.0.1"
-DEFAULT_DAEMON_PORT = 18765
+DEFAULT_DAEMON_PORT = 18777
 
 ACADEMIC_ABBREVIATIONS = (
     "et al.", "e.g.", "i.e.", "Fig.", "Eq.", "Sec.", "vs.", "p.", "Prof.", "Dr.", "cf.", "etc.", "al."
@@ -348,7 +348,9 @@ def check_daemon_health(host: str = DEFAULT_DAEMON_HOST, port: int = DEFAULT_DAE
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data.get("status") == "ok"
+                return data.get("status") == "ok" and (
+                    data.get("service") == "stealth_rewriter" or "models_loaded" in data
+                )
     except Exception:
         pass
     return False
@@ -651,16 +653,29 @@ def apply_stealth_to_modified_prose(
         chosen_text = None
         style_rejects = 0
 
-        # Si le résultat fournit une liste de candidats classés
+        score_before = stat.get("score_before", 0.0)
+        score_after = stat.get("score_after", 0.0)
+
+        # Si candidates_ranked est absent mais changed=True et rew_text fourni -> fallback gracieux
         candidates = stat.get("candidates_ranked", [])
-        if candidates:
+        if not candidates and stat.get("changed") and rew_text:
+            candidates = [{"text": rew_text, "risk": score_after}]
+
+        # Vérification de monotonicité stricte : score_after doit être strictement inférieur à score_before (si score_before > 0)
+        monotonic_ok = (score_before <= 0.0 or score_after < score_before)
+
+        if candidates and monotonic_ok:
             for cand in candidates:
-                cand_t = cand["text"]
+                cand_t = cand.get("text", "")
+                cand_risk = cand.get("risk", score_after)
+                if score_before > 0.0 and cand_risk >= score_before:
+                    continue
                 if check_style(cand_t, language=language, context_mode=context_mode, allowed_terms=allowed_terms).verdict != "FAIL":
                     chosen_text = cand_t
+                    score_after = cand_risk
                     break
                 style_rejects += 1
-        elif rew_text:
+        elif rew_text and monotonic_ok:
             if check_style(rew_text, language=language, context_mode=context_mode, allowed_terms=allowed_terms).verdict != "FAIL":
                 chosen_text = rew_text
             else:
@@ -669,9 +684,18 @@ def apply_stealth_to_modified_prose(
         frag = modified_records[r_idx]["plan"][p_idx]
         is_validated = (chosen_text is not None and chosen_text != orig_text)
         frag["rewritten_text"] = chosen_text if is_validated else orig_text
-        frag["status"] = "VALIDÉ" if is_validated else ("REJET_STYLE_GUARD" if style_rejects > 0 else stat.get("status", "REJET_GATES"))
-        frag["risk_before"] = stat.get("score_before", 0.0)
-        frag["risk_after"] = stat.get("score_after", 0.0)
+        if is_validated:
+            status = "VALIDÉ"
+        elif not monotonic_ok:
+            status = "REJET_MONOTONICITE"
+        elif style_rejects > 0:
+            status = "REJET_STYLE_GUARD"
+        else:
+            status = stat.get("status", "REJET_GATES")
+
+        frag["status"] = status
+        frag["risk_before"] = score_before
+        frag["risk_after"] = score_after if is_validated else score_before
 
     # Réassemblage des segments et réinsertion dans les lignes du document
     lines = new_raw.split("\n")
@@ -708,7 +732,7 @@ def apply_stealth_to_modified_prose(
 
         report["segments"].append({
             "lines": f"L{rec['start'] + 1}-L{rec['end']}",
-            "status": "VALIDÉ" if any_frag_rewritten else "REJET_GATES",
+            "status": "VALIDÉ" if any_frag_rewritten else next((frag.get("status") for frag in rec["plan"] if frag["type"] == "modified"), "REJET_GATES"),
             "risk_before": round(avg_before, 4),
             "risk_after": round(avg_after, 4),
             "original": rec["original_seg"],

@@ -292,3 +292,125 @@ def test_get_diff_artifact_stealth_integration(monkeypatch, tmp_path):
     assert "> [!NOTE]" in art_content
     assert "🛡️ Obfuscation Automatique StealthRL" in art_content
     assert "`daemon`" in art_content
+
+
+class _ForeignServiceHandler(http.server.BaseHTTPRequestHandler):
+    response_payload = {"status": "ok", "service": "aivc_daemon"}
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(self.response_payload).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def test_check_daemon_health_rejects_foreign_service():
+    """Valide que check_daemon_health rejette un service étranger (ex: aivc.daemon sur 18765) sans service:stealth_rewriter."""
+    port = _get_free_port()
+    server = http.server.HTTPServer(("127.0.0.1", port), _ForeignServiceHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        # 1. Réponse avec un service étranger -> False
+        _ForeignServiceHandler.response_payload = {"status": "ok", "service": "aivc_daemon"}
+        assert check_daemon_health(host="127.0.0.1", port=port) is False
+
+        # 2. Réponse générique status: ok sans tag de service ni models_loaded -> False
+        _ForeignServiceHandler.response_payload = {"status": "ok"}
+        assert check_daemon_health(host="127.0.0.1", port=port) is False
+
+        # 3. Réponse avec service: stealth_rewriter -> True
+        _ForeignServiceHandler.response_payload = {"status": "ok", "service": "stealth_rewriter"}
+        assert check_daemon_health(host="127.0.0.1", port=port) is True
+
+        # 4. Réponse avec models_loaded: True -> True
+        _ForeignServiceHandler.response_payload = {"status": "ok", "models_loaded": True}
+        assert check_daemon_health(host="127.0.0.1", port=port) is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_apply_stealth_fallback_candidates_ranked_and_monotonicity(monkeypatch):
+    """Valide le fallback gracieux si candidates_ranked est absent et la stricte monotonicité."""
+    old_raw = (
+        "\\begin{document}\n"
+        "We consider decentralized gradient optimization across workers.\n"
+        "\\end{document}"
+    )
+    new_raw = (
+        "\\begin{document}\n"
+        "Moreover, we delve into a multifaceted tapestry of deep neural network architectures.\n"
+        "\\end{document}"
+    )
+
+    # 1. Test du fallback : changed=True, candidates_ranked absent mais rewritten fourni
+    def mock_batch_fallback(*args, **kwargs):
+        return {
+            "rewritten": ["We examine diverse neural network architectures across multiple distributed tasks."],
+            "stats": [{
+                "changed": True,
+                "score_before": 0.88,
+                "score_after": 0.12,
+                "status": "VALIDÉ"
+                # candidates_ranked intentionnellement absent
+            }],
+            "engine_mode": "daemon",
+            "total_elapsed_ms": 32.0
+        }
+
+    monkeypatch.setattr("doc_version_mcp.stealth_bridge.execute_stealth_batch", mock_batch_fallback)
+    monkeypatch.setattr("doc_version_mcp.stealth_bridge.resolve_stealth_runtime", lambda: ("python.exe", Path("stealth_rewriter.py")))
+
+    rewritten, report = apply_stealth_to_modified_prose(
+        old_raw=old_raw,
+        new_raw=new_raw,
+        target_path=Path("paper.tex"),
+        language="en",
+        context_mode="technical",
+        allowed_terms=None,
+        use_daemon=True
+    )
+    assert report["segments_rewritten"] == 1
+    assert report["segments"][0]["status"] == "VALIDÉ"
+    assert report["segments"][0]["risk_after"] == 0.12
+    assert "We examine diverse neural network architectures" in rewritten
+
+    # 2. Test de monotonicité : score_after >= score_before -> REJET_MONOTONICITE
+    def mock_batch_non_monotonic(*args, **kwargs):
+        return {
+            "rewritten": ["A worse sentence that increases AI risk further."],
+            "stats": [{
+                "changed": True,
+                "score_before": 0.50,
+                "score_after": 0.82,  # Régression de score -> doit être rejeté
+                "status": "VALIDÉ"
+            }],
+            "engine_mode": "daemon",
+            "total_elapsed_ms": 25.0
+        }
+
+    monkeypatch.setattr("doc_version_mcp.stealth_bridge.execute_stealth_batch", mock_batch_non_monotonic)
+
+    rewritten_mono, report_mono = apply_stealth_to_modified_prose(
+        old_raw=old_raw,
+        new_raw=new_raw,
+        target_path=Path("paper.tex"),
+        language="en",
+        context_mode="technical",
+        allowed_terms=None,
+        use_daemon=True
+    )
+    assert report_mono["segments_rewritten"] == 0
+    assert report_mono["segments"][0]["status"] == "REJET_MONOTONICITE"
+    # Le texte doit être resté intact (non modifié par un candidat régressif)
+    assert rewritten_mono == new_raw
+
