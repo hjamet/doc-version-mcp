@@ -249,6 +249,7 @@ def extract_prose_segments(raw_text: str, is_latex: bool) -> List[Tuple[int, int
         non_prose = (
             in_code or not s or s.startswith(("#", "|", ">", "<", "!", "---", "- ", "* ", "+ "))
             or bool(re.match(r'^\d+[.)]\s', s))
+            or bool(re.match(r'^(?:Subject|Objet)\s*:', s, flags=re.IGNORECASE))
         )
         if non_prose:
             _flush(i)
@@ -373,7 +374,7 @@ def start_stealth_daemon(
     host: str = DEFAULT_DAEMON_HOST,
     port: int = DEFAULT_DAEMON_PORT,
     idle_timeout: int = 900,
-    max_wait_seconds: float = 60.0
+    max_wait_seconds: float = 120.0
 ) -> bool:
     """Démarre stealth_rewriter.py --serve en arrière-plan détaché et attend /health."""
     if check_daemon_health(host, port, timeout=0.3):
