@@ -243,9 +243,9 @@ def get_git_upstream_commit(repo_root: Path) -> Optional[str]:
         return None
 
 
-def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path]) -> Optional[Path]:
+def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path], mode: str = "paper") -> Optional[Path]:
     """Recherche un fichier PDF compagnon compilé pour target_path ou son dossier."""
-    if not target_path and not base_dir:
+    if mode == "draft" or (not target_path and not base_dir):
         return None
 
     if target_path and target_path.suffix.lower() != ".pdf":
@@ -296,7 +296,8 @@ def get_diff_artifact(
         new_text = ""
         baseline_commit_id = from_commit_id
 
-        target_path = Path(target) if target else None
+        is_virtual = str(target).startswith(("virtual:", "scratch:"))
+        target_path = Path(target) if (target and not is_virtual) else None
         if target_path and not target_path.is_absolute():
             target_path = target_path.resolve()
 
@@ -311,7 +312,7 @@ def get_diff_artifact(
 
         # Détection Git
         is_git, repo_root, rel_git_path = (False, None, None)
-        if target_path and not str(target).startswith(("virtual:", "scratch:")):
+        if target_path and not is_virtual:
             is_git, repo_root, rel_git_path = get_git_repo_info(target_path)
 
         # Contenu actuel sur le disque
@@ -675,7 +676,7 @@ def get_diff_artifact(
 
         # Détection et préparation du PDF compagnon compilé (ex. document LaTeX compilé)
         companion_pdf_banner = None
-        companion_pdf = find_companion_pdf(target_path, base_dir)
+        companion_pdf = find_companion_pdf(target_path, base_dir, mode=mode)
         if companion_pdf and companion_pdf.is_file():
             b_dir_companion = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
             b_dir_companion.mkdir(parents=True, exist_ok=True)

@@ -567,7 +567,12 @@ def format_stealth_callout(stealth_report: Dict[str, Any]) -> str:
         b_risk = seg.get("risk_before", 0.0)
         a_risk = seg.get("risk_after", 0.0)
         delta = (b_risk - a_risk) * 100
-        delta_str = f"-{delta:.1f}%" if delta > 0 else f"+{-delta:.1f}%"
+        if abs(delta) < 0.05:
+            delta_str = "0.0%"
+        elif delta > 0:
+            delta_str = f"-{delta:.1f}%"
+        else:
+            delta_str = f"+{-delta:.1f}%"
         status = seg.get("status", "VALIDÉ")
         if status == "VALIDÉ":
             status_label = "🟢 Validé"
