@@ -97,7 +97,7 @@ def split_sentences(text: str) -> List[str]:
     t = text
     for idx, ab in enumerate(ACADEMIC_ABBREVIATIONS):
         t = re.sub(rf'\b{re.escape(ab)}', f"\x00AB{idx}\x00", t, flags=re.IGNORECASE)
-    chunks = re.split(r'(?<=[.!?])\s+(?=[A-Z$\\\(\x00])', t)
+    chunks = re.split(r'(?:(?<=[.!?])|(?<=:D)|(?<=:\))|(?<=\^\^))\s+(?=[A-Z$\\\(\x00])', t)
     sentences: List[str] = []
     for c in chunks:
         clean_c = c.strip()
@@ -295,30 +295,41 @@ def resolve_stealth_runtime() -> Tuple[str, Path]:
             "[FAIL-FAST] stealth_rewriter.py introuvable : définir DOC_VERSION_STEALTH_SCRIPT."
         )
 
-    # Résolution ordonnée de l'interpréteur Python avec CUDA
+    # Résolution ordonnée et dédupliquée de l'interpréteur Python avec CUDA
     py_env = (
         os.environ.get("STEALTH_PYTHON_EXE", "").strip()
         or os.environ.get("DOC_VERSION_STEALTH_PYTHON", "").strip()
     )
-    candidates: List[str] = []
+    raw_candidates: List[str] = []
     if py_env:
-        candidates.append(py_env)
+        raw_candidates.append(py_env)
     for p_cand in PREFERRED_CUDA_CANDIDATES:
         if p_cand.is_file():
-            candidates.append(str(p_cand))
-    candidates.append(sys.executable)
+            raw_candidates.append(str(p_cand))
+    raw_candidates.append(sys.executable)
     which_py = shutil.which("python")
     if which_py:
-        candidates.append(which_py)
+        raw_candidates.append(which_py)
+
+    candidates: List[str] = []
+    seen_norm: set = set()
+    for c in raw_candidates:
+        if not c or not Path(c).is_file():
+            continue
+        try:
+            norm_c = os.path.normcase(str(Path(c).resolve()))
+        except Exception:
+            norm_c = os.path.normcase(c)
+        if norm_c not in seen_norm:
+            seen_norm.add(norm_c)
+            candidates.append(c)
 
     probes = []
     for exe in candidates:
-        if not exe or not Path(exe).is_file():
-            continue
         try:
             res = subprocess.run(
                 [exe, "-c", "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 3)"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=30
             )
             probes.append(f"{exe} -> code {res.returncode}")
             if res.returncode == 0:
@@ -362,7 +373,7 @@ def start_stealth_daemon(
     host: str = DEFAULT_DAEMON_HOST,
     port: int = DEFAULT_DAEMON_PORT,
     idle_timeout: int = 900,
-    max_wait_seconds: float = 25.0
+    max_wait_seconds: float = 60.0
 ) -> bool:
     """Démarre stealth_rewriter.py --serve en arrière-plan détaché et attend /health."""
     if check_daemon_health(host, port, timeout=0.3):
@@ -557,7 +568,12 @@ def format_stealth_callout(stealth_report: Dict[str, Any]) -> str:
         delta = (b_risk - a_risk) * 100
         delta_str = f"-{delta:.1f}%" if delta > 0 else f"+{-delta:.1f}%"
         status = seg.get("status", "VALIDÉ")
-        status_label = "🟢 Validé" if status == "VALIDÉ" else f"⚠️ {status}"
+        if status == "VALIDÉ":
+            status_label = "🟢 Validé"
+        elif status == "ALREADY_CLEAN":
+            status_label = "🟢 Certifié (≤ 20%)"
+        else:
+            status_label = f"⚠️ {status}"
         lines.append(f"> | {i} | {lines_info} | {b_risk*100:.1f}% | {a_risk*100:.1f}% | {delta_str} | {status_label} |")
     return "\n".join(lines) + "\n\n"
 
@@ -661,14 +677,16 @@ def apply_stealth_to_modified_prose(
         if not candidates and stat.get("changed") and rew_text:
             candidates = [{"text": rew_text, "risk": score_after}]
 
-        # Vérification de monotonicité stricte : score_after doit être strictement inférieur à score_before (si score_before > 0)
-        monotonic_ok = (score_before <= 0.0 or score_after < score_before)
+        # Vérification de monotonicité : réduction stricte si score_before > 0.15, ou maintien <= 0.15 si déjà bas
+        monotonic_ok = (score_after < score_before) if score_before > 0.15 else (score_after <= 0.15)
 
         if candidates and monotonic_ok:
             for cand in candidates:
                 cand_t = cand.get("text", "")
                 cand_risk = cand.get("risk", score_after)
-                if score_before > 0.0 and cand_risk >= score_before:
+                if score_before > 0.15 and cand_risk >= score_before:
+                    continue
+                if score_before <= 0.15 and cand_risk > 0.15:
                     continue
                 if check_style(cand_t, language=language, context_mode=context_mode, allowed_terms=allowed_terms).verdict != "FAIL":
                     chosen_text = cand_t
@@ -686,6 +704,8 @@ def apply_stealth_to_modified_prose(
         frag["rewritten_text"] = chosen_text if is_validated else orig_text
         if is_validated:
             status = "VALIDÉ"
+        elif stat.get("status") == "ALREADY_CLEAN":
+            status = "ALREADY_CLEAN"
         elif not monotonic_ok:
             status = "REJET_MONOTONICITE"
         elif style_rejects > 0:

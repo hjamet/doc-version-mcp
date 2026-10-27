@@ -521,6 +521,7 @@ def get_diff_artifact(
         should_run_stealth = run_stealth if run_stealth is not None else (not bool(os.environ.get("PYTEST_CURRENT_TEST")))
         stealth_report: Dict[str, Any] = {"applied": False}
         parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
+        pre_stealth_new_text = new_text
         if not to_commit_id and new_text.strip():
             from_disk = not content and disk_content is not None
             if should_run_stealth:
@@ -612,7 +613,11 @@ def get_diff_artifact(
         retention = None
         is_compliant = None
         if mode == "draft":
-            retention = DraftEngine.calculate_retention(old_text, new_text)
+            clean_pre_stealth = LatexToMarkdownConverter.strip_html_and_styles(pre_stealth_new_text)
+            retention = max(
+                DraftEngine.calculate_retention(old_text, new_text),
+                DraftEngine.calculate_retention(old_text, clean_pre_stealth)
+            )
             is_compliant = retention >= 90.0
 
         # 3. Boucle bloquante déterministe avoid-ai-writing
@@ -704,7 +709,7 @@ def get_diff_artifact(
         )
 
         # Injection du bloc d'obfuscation StealthRL dans l'en-tête du diff
-        if stealth_report.get("applied") and stealth_report.get("segments_rewritten", 0) > 0:
+        if stealth_report.get("applied") and (stealth_report.get("segments_rewritten", 0) > 0 or stealth_report.get("segments_modified", 0) > 0):
             callout_str = format_stealth_callout(stealth_report)
             meta_match = re.match(r'^((?:---\n.*?\n---\n*)?(?:<!--.*?-->\n*)+)', artifact_content, re.DOTALL)
             if meta_match:
