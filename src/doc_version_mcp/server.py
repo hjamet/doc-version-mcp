@@ -431,8 +431,8 @@ def get_diff_artifact(
         if not old_text and disk_content is not None and content and disk_content.strip() != content.strip():
             old_text = disk_content
 
-        # Réécriture StealthRL optionnelle (par défaut activée si mode == 'paper' hors suite pytest automatique)
-        should_run_stealth = run_stealth if run_stealth is not None else (mode == "paper" and not os.environ.get("PYTEST_CURRENT_TEST"))
+        # Réécriture StealthRL automatique (activée par défaut quel que soit le mode hors suite pytest unitaire)
+        should_run_stealth = run_stealth if run_stealth is not None else (not bool(os.environ.get("PYTEST_CURRENT_TEST")))
         stealth_report: Dict[str, Any] = {"applied": False}
         parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
         if not to_commit_id and new_text.strip():
@@ -971,7 +971,7 @@ def main():
         p_diff.add_argument("--brain-dir", default="", help="Brain directory to write artifact")
         p_diff.add_argument("--artifact-name", default="", help="Base name of output artifact")
         p_diff.add_argument("--run-stealth", dest="run_stealth", action="store_true", default=None, help="Force execution of StealthRL")
-        p_diff.add_argument("--no-run-stealth", dest="run_stealth", action="store_false", help="Disable StealthRL")
+        p_diff.add_argument("--no-stealth", "--no-run-stealth", dest="run_stealth", action="store_false", help="Disable StealthRL")
 
         # restore
         p_restore = subparsers.add_parser("restore", help="Restore snapshot from CAS")
