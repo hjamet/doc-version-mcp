@@ -56,8 +56,8 @@ class BibTexParser:
         text = text.replace(r'{\v{d}}', 'ď').replace(r'\v{d}', 'ď')
         text = text.replace(r'{\v{t}}', 'ť').replace(r'\v{t}', 'ť')
         text = text.replace(r'{\v{n}}', 'ň').replace(r'\v{n}', 'ň')
-        # Formes avec backslash direct comme \vsevic ou \vcek
-        text = re.sub(r'\\v\s*([cszredtnCSZREDTN])', r'\1', text)
+        # Formes avec backslash direct comme \vsevic ou \vcek (sécurisé pour ne pas altérer \vspace, \vfill, \vrule...)
+        text = re.sub(r'\\v(?![a-zA-Z]{2,})\s*([cszredtnCSZREDTN])', r'\1', text)
         text = re.sub(r'\\\'\s*([cszCSZ])', r'\1', text)
         text = re.sub(r'\\&', '&', text)
         return text
@@ -165,6 +165,19 @@ class LatexMacroEngine:
     @classmethod
     def extract_macros(cls, text: str) -> Tuple[str, Dict[str, Dict[str, Any]]]:
         macros: Dict[str, Dict[str, Any]] = {}
+
+        # 0. Élimination complète des blocs TeX internes \makeatletter ... \makeatother
+        text = re.sub(r'\\makeatletter.*?\\makeatother', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\(?:makeatletter|makeatother)\b', '', text)
+
+        # Commandes de structure standard ne devant JAMAIS être redéfinies ni enregistrées comme macros utilisateur
+        PROTECTED_STRUCTURE_COMMANDS = {
+            "section", "subsection", "subsubsection", "paragraph", "subparagraph",
+            "chapter", "part", "caption", "tableofcontents", "listoffigures", "listoftables",
+            "bibliography", "bibliographystyle", "title", "author", "date", "abstract",
+            "maketitle", "appendix", "table", "figure", "tabular", "tabularx"
+        }
+
         pattern_new = re.compile(
             r'\\(?:newcommand|renewcommand|providecommand)\*?\s*(?:\{\\([a-zA-Z]+)\}|\\([a-zA-Z]+))(?:\s*\[(\d+)\])?\s*\{'
         )
@@ -176,7 +189,8 @@ class LatexMacroEngine:
             num_args = int(m.group(3)) if m.group(3) else 0
             open_brace_idx = m.end() - 1
             body, end_idx = cls.extract_braced_group(text, open_brace_idx)
-            macros[name] = {"args": num_args, "body": body}
+            if name.lower() not in PROTECTED_STRUCTURE_COMMANDS:
+                macros[name] = {"args": num_args, "body": body}
             text = text[:m.start()] + text[end_idx:]
 
         pattern_def = re.compile(r'\\def\s*\\([a-zA-Z]+)((?:#\d+)*)\s*\{')
@@ -189,7 +203,8 @@ class LatexMacroEngine:
             num_args = len(re.findall(r'#\d', params_str))
             open_brace_idx = m.end() - 1
             body, end_idx = cls.extract_braced_group(text, open_brace_idx)
-            macros[name] = {"args": num_args, "body": body}
+            if name.lower() not in PROTECTED_STRUCTURE_COMMANDS:
+                macros[name] = {"args": num_args, "body": body}
             text = text[:m.start()] + text[end_idx:]
 
         return text, macros
@@ -354,7 +369,12 @@ class LatexToMarkdownConverter:
         """Extrait le titre, les auteurs, les keywords et prépare le corps de texte."""
         title_match = re.search(r'\\title\s*\{((?:[^{}]|{[^{}]*})*)\}', text, re.DOTALL)
         if title_match:
-            self.title = self.clean_inline_formatting(title_match.group(1).strip())
+            raw_title = title_match.group(1).strip()
+            raw_title = self.clean_layout_formatting(raw_title)
+            cleaned_t = self.clean_inline_formatting(raw_title).strip()
+            cleaned_t = re.sub(r'^\*\*(.*?)\*\*$', r'\1', cleaned_t).strip()
+            cleaned_t = re.sub(r'\s+', ' ', cleaned_t).strip()
+            self.title = cleaned_t
 
         author_match = re.search(r'\\author\s*\{((?:[^{}]|{[^{}]*})*)\}', text, re.DOTALL)
         if author_match:
@@ -1058,7 +1078,14 @@ class LatexToMarkdownConverter:
             if not changed:
                 break
 
-        text = re.sub(r'\\looseness\s*=\s*-?\d+', '', text)
+        text = re.sub(r'\\makeatletter.*?\\makeatother', '', text, flags=re.DOTALL)
+        text = re.sub(r'\\(?:makeatletter|makeatother)\b', '', text)
+        text = re.sub(r'\\(?:interlinepenalty|clubpenalty|widowpenalty|looseness|tolerance|pretolerance)\s*(?:=\s*)?-?\d+', '', text)
+        text = re.sub(r'\\emergencystretch\s*(?:=\s*)?\S+', '', text)
+        text = re.sub(r'\\(?:setlength|addtolength)\s*\{[^{}]*\}\s*\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:nopagebreak|pagebreak)(?:\s*\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\(?:newpage|clearpage|cleardoublepage)\b', ' ', text)
+        text = re.sub(r'\\[nN]eedspace\*?(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\})?', '', text)
         text = re.sub(
             r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*',
             '',
@@ -1561,15 +1588,18 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\(?:normalfont|bfseries|itshape|slshape|scshape|sffamily|ttfamily|rmfamily)\b', '', text)
 
         # 3. Espacements verticaux/horizontaux et règles de séparation
-        text = re.sub(r'\\vspace\*?\{[^{}]*\}', '\n\n', text)
-        text = re.sub(r'\\hspace\*?\{[^{}]*\}', ' ', text)
+        text = re.sub(r'\\vspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', '\n\n', text)
+        text = re.sub(r'\\hspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', ' ', text)
         text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
-        text = re.sub(r'\\(?:pagebreak|clearpage|newpage|vfill|hfill|noindent|centering|raggedleft|raggedright|frenchspacing)\b', ' ', text)
-        text = re.sub(r'\\needspace(?:\{[^{}]*\}|\[[^\]]*\])?', '', text)
-        text = re.sub(r'\\(?:setlength|addtolength)\{[^{}]*\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\renewcommand\{\\arraystretch\}\{[^{}]*\}', '', text)
-        text = re.sub(r'\\looseness\s*=\s*-?\d+', '', text)
-        text = re.sub(r'\\(?:emergencystretch|tolerance|pretolerance|clubpenalty|widowpenalty)\s*(?:=\s*)?-?\d+(?:\.[0-9]+)?(?:pt|em|ex|cm|mm|in)?', '', text)
+        text = re.sub(r'\\(?:nopagebreak|pagebreak)(?:\s*\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\(?:newpage|clearpage|cleardoublepage)\b', ' ', text)
+        text = re.sub(r'\\(?:vfill|hfill|noindent|centering|raggedleft|raggedright|frenchspacing)\b', ' ', text)
+        text = re.sub(r'\\[nN]eedspace\*?(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\})?', '', text)
+        text = re.sub(r'\\(?:setlength|addtolength)\s*\{[^{}]*\}\s*\{[^{}]*\}', '', text)
+        text = re.sub(r'\\renewcommand\{\\(?:arraystretch|baselinestretch)\}\{[^{}]*\}', '', text)
+        text = re.sub(r'\\(?:interlinepenalty|clubpenalty|widowpenalty|looseness|tolerance|pretolerance)\s*(?:=\s*)?-?\d+', '', text)
+        text = re.sub(r'\\(?:emergencystretch|tolerance|pretolerance|clubpenalty|widowpenalty|interlinepenalty)\s*(?:=\s*)?-?\d+(?:\.[0-9]+)?(?:pt|em|ex|cm|mm|in)?', '', text)
+        text = re.sub(r'\\emergencystretch\s*(?:=\s*)?\S+', '', text)
 
         # 4. Règles, boîtes, couleurs et dimensions
         text = re.sub(r'\\hrule\b(?:[ \t]*(?:height|width|depth)[ \t]+[\d\.]+\s*[a-zA-Z%]+)*', '\n\n---\n\n', text)
@@ -1633,6 +1663,15 @@ class LatexToMarkdownConverter:
         text = re.sub(r'\\allowbreak(?![a-zA-Z])\s*', '', text)
         text = re.sub(r'\\par\b', '\n\n', text)
         text = re.sub(r'\\(?:smallskip|medskip|bigskip)\b', '\n\n', text)
+        text = re.sub(r'\\vspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', ' ', text)
+        text = re.sub(r'\\hspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', ' ', text)
+        text = re.sub(r'\\(?:nopagebreak|pagebreak)(?:\s*\[[^\]]*\])?', '', text)
+        text = re.sub(r'\\(?:newpage|clearpage|cleardoublepage)\b', ' ', text)
+        text = re.sub(r'\\[nN]eedspace\*?(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\})?', '', text)
+        text = re.sub(r'\\(?:interlinepenalty|clubpenalty|widowpenalty|looseness|tolerance|pretolerance)\s*(?:=\s*)?-?\d+', '', text)
+        text = re.sub(r'\\emergencystretch\s*(?:=\s*)?\S+', '', text)
+        text = re.sub(r'\\(?:setlength|addtolength)\s*\{[^{}]*\}\s*\{[^{}]*\}', '', text)
+        text = re.sub(r'\\\\(?:\[[^\]]*\])?', ' ', text)
         text = self.replace_shortstack(text)
         text = self.preclean_markup(text)
 
@@ -1666,8 +1705,9 @@ class LatexToMarkdownConverter:
         text = text.replace(r'\{', '{').replace(r'\}', '}')
 
         text = BibTexParser.decode_latex_accents(text)
-        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|vfill|hfill|tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', ' ', text)
+        text = re.sub(r'\\(?:centering|noindent|frenchspacing|medskip|bigskip|smallskip|clearpage|newpage|cleardoublepage|vfill|hfill|tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', ' ', text)
         text = re.sub(r'\\label\{[^}]+\}', '', text)
+        text = re.sub(r'\\textbackslash(?:\{\}|\b\s*)', '\\\\', text)
         text = re.sub(r'\\(?:color\b|rowcolor\b|columncolor\b|cellcolor\b|arrayrulecolor\b)(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\}|\s+[a-zA-Z0-9!_]+)?', '', text)
         text = re.sub(r'\\cmidrule(?:\s*\([^)]*\))?(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\}|\s*\d+-\d+)?', '', text)
         text = re.sub(r'\\(?:toprule|midrule|bottomrule|hline|addlinespace)\b', '', text)
@@ -1821,6 +1861,15 @@ class LatexToMarkdownConverter:
         final_md = re.sub(r'\\keywords\s*\{.*?\}', '', final_md, flags=re.DOTALL)
         final_md = re.sub(r'\\and\b', ' • ', final_md)
         final_md = re.sub(r'\\(?:Statex|State|Require|Ensure|EndFor|EndIf|EndWhile)\b', '', final_md)
+        final_md = re.sub(r'\\(?:interlinepenalty|clubpenalty|widowpenalty|looseness|tolerance|pretolerance)\s*(?:=\s*)?-?\d+', '', final_md)
+        final_md = re.sub(r'\\emergencystretch\s*(?:=\s*)?\S+', '', final_md)
+        final_md = re.sub(r'\\(?:nopagebreak|pagebreak)(?:\s*\[[^\]]*\])?', '', final_md)
+        final_md = re.sub(r'\\(?:newpage|clearpage|cleardoublepage)\b', ' ', final_md)
+        final_md = re.sub(r'\\[nN]eedspace\*?(?:\s*\[[^\]]*\])?(?:\s*\{[^{}]*\})?', '', final_md)
+        final_md = re.sub(r'\\(?:noindent|vfill|hfill)\b', ' ', final_md)
+        final_md = re.sub(r'\\vspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', '\n\n', final_md)
+        final_md = re.sub(r'\\hspace\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}', ' ', final_md)
+        final_md = re.sub(r'\\textbackslash(?:\{\}|\b\s*)', '\\\\', final_md)
         final_md = re.sub(r'\\(?:textsf|textsc|textup|textmd|textrm|textnormal|text|underline|textbf|textit|emph|textsl|texttt)\b\s*\{?', '', final_md)
         final_md = re.sub(r'\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|appendix)\b[ \t]*', '', final_md)
         final_md = re.sub(r'\*\*\}([ \t]*)', '** ', final_md)

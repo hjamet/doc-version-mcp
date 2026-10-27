@@ -635,4 +635,73 @@ def test_html_to_markdown_converter_and_diff_artifact(tmp_path):
     assert (brain_dir / "diagram.png").exists()
 
 
+def test_latex_filtering_and_structure_commands_protection():
+    r"""
+    Vérifie la non-redéfinition des commandes de structure (\section, \subsection)
+    lors de l'expansion de macros (\makeatletter ... \renewcommand\section... \makeatother)
+    et la suppression rigoureuse des commandes d'espacement (\vspace{-1.2cm}),
+    de pagination (\nopagebreak[4]), de pénalités TeX (\interlinepenalty=10000)
+    et le traitement propre de \textbackslash.
+    """
+    latex_snippet = r"""\documentclass{article}
+\makeatletter
+\renewcommand\section{\@startsection {section}{1}{\z@}%
+  {-1.3ex \@plus -0.3ex \@minus -.2ex}%
+  {0.5ex \@plus.1ex}%
+  {\normalfont\large\bfseries}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-0.9ex\@plus -0.2ex \@minus -.1ex}%
+  {0.25ex \@plus .1ex}%
+  {\normalfont\normalsize\bfseries}}
+\makeatother
+
+\title{\vspace{-1.2cm}\textbf{\large Point-by-Point Response to Reviewers}\\[0.2em]}
+\author{Henri Jamet}
+
+\newcommand{\revquote}[2]{%
+    \par\vspace{0.32cm}\nopagebreak[4]%
+    \noindent\textcolor{gray!45}{\rule{\textwidth}{0.4pt}}\par\nopagebreak[4]\vspace{0.14cm}%
+    \noindent{\small\interlinepenalty=10000\clubpenalty=1000\widowpenalty=1000\textbf{#1:} \textit{``#2''}\par}\nopagebreak[4]\vspace{0.12cm}%
+}
+
+\begin{document}
+\maketitle
+
+\section{Response to Action Editor}
+
+\subsection{AE.1: Statistical Rigor}
+\revquote{Action Editor}{Please report variance across runs.}
+
+We added Section 6.2.3 (\texttt{\textbackslash label{\allowbreak subsubsec:\allowbreak human\_eval}})
+and refer to \texttt{\textbackslash autoref{tab:hyperparameters}}.
+
+\end{document}
+"""
+    res = LatexToMarkdownConverter.convert_text(latex_snippet)
+
+    # 1. Structure headings préservée et convertie en Markdown sans @startsection
+    assert "## Response to Action Editor" in res
+    assert "### AE.1: Statistical Rigor" in res
+    assert "@startsection" not in res
+
+    # 2. Aucune fuite d'espacement ou titre altéré en space{-1.2cm}
+    assert "# Point-by-Point Response to Reviewers" in res
+    assert "space{-1.2cm}" not in res
+    assert r"\vspace" not in res
+
+    # 3. Commandes de pagination et pénalités supprimées
+    assert r"\nopagebreak" not in res
+    assert "nopagebreak" not in res
+    assert r"\interlinepenalty" not in res
+    assert "interlinepenalty" not in res
+    assert "clubpenalty" not in res
+    assert "widowpenalty" not in res
+
+    # 4. Traitement propre de \textbackslash
+    assert r"\textbackslash" not in res
+    assert "`\\label{subsubsec:human_eval}`" in res or "`\\label{subsubsec:_human_eval}`" in res or "\\label{subsubsec:human_eval}" in res
+    assert "`\\autoref{tab:hyperparameters}`" in res
+
+
+
 
