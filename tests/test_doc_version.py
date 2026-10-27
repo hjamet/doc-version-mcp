@@ -1581,6 +1581,83 @@ def test_no_duplicate_revision_note_and_no_intro_preamble_on_sectionless_doc():
     assert "Introduction & Préambule" not in artifact
 
 
+def test_companion_pdf_detection_and_banner(tmp_path):
+    """Vérifie la détection et la copie du PDF compagnon d'un .tex dans brain_dir + bandeau."""
+    tex_dir = tmp_path / "paper_latex"
+    tex_dir.mkdir()
+    tex_file = tex_dir / "manuscript.tex"
+    tex_content = r"\section{Introduction}" + "\nThis is a paper.\n"
+    tex_file.write_text(tex_content, encoding="utf-8")
+
+    # Création du PDF compagnon compilé (binaire)
+    pdf_file = tex_dir / "manuscript.pdf"
+    pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
+    pdf_file.write_bytes(pdf_bytes)
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+
+    res_json = get_diff_artifact(
+        target=str(tex_file),
+        brain_dir=str(brain_dir),
+        content=tex_content,
+        mode="paper"
+    )
+    res = json.loads(res_json)
+    assert res["status"] == "success"
+
+    # Vérification de la copie du PDF compagnon dans brain_dir
+    copied_pdf = brain_dir / "manuscript.pdf"
+    assert copied_pdf.is_file()
+    assert copied_pdf.read_bytes() == pdf_bytes
+
+    # Vérification du bandeau dans l'artefact Markdown
+    saved_art = Path(res["saved_artifact_path"])
+    assert saved_art.is_file()
+    art_text = saved_art.read_text(encoding="utf-8")
+    assert "> [!TIP]" in art_text
+    assert "Visualisation & Annotation PDF Native Antigravity" in art_text
+    assert f"[Ouvrir et annoter manuscript.pdf](file:///" in art_text
+    assert "manuscript.pdf" in art_text
+
+
+def test_direct_pdf_handling(tmp_path):
+    """Vérifie la gestion directe d'un fichier .pdf sans lire le binaire en UTF-8."""
+    docs_dir = tmp_path / "documents"
+    docs_dir.mkdir()
+    pdf_file = docs_dir / "sample_report.pdf"
+    # Contient des octets arbitraires non valides en UTF-8 pour tester la robustesse
+    raw_pdf_bytes = b"%PDF-1.7\n\xff\xfe\xfa\x80\x99binarydata\n%%EOF"
+    pdf_file.write_bytes(raw_pdf_bytes)
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+
+    res_json = get_diff_artifact(
+        target=str(pdf_file),
+        brain_dir=str(brain_dir),
+        mode="paper"
+    )
+    res = json.loads(res_json)
+    assert res["status"] == "success"
+
+    # Le PDF doit avoir été copié dans brain_dir
+    copied_pdf = brain_dir / "sample_report.pdf"
+    assert copied_pdf.is_file()
+    assert copied_pdf.read_bytes() == raw_pdf_bytes
+
+    # Un artefact Markdown léger a été créé
+    saved_art = Path(res["saved_artifact_path"])
+    assert saved_art.is_file()
+    art_text = saved_art.read_text(encoding="utf-8")
+    assert "> [!TIP]" in art_text
+    assert "Visualisation & Annotation PDF Native Antigravity" in art_text
+    assert "[Ouvrir et annoter sample_report.pdf](file:///" in art_text
+    assert "sample_report.pdf" in art_text
+    assert res["pdf_path"] == copied_pdf.as_posix()
+
+
+
 
 
 

@@ -8,6 +8,7 @@ import re
 import json
 import subprocess
 import tempfile
+import shutil
 from datetime import datetime, timezone
 
 from pathlib import Path
@@ -242,6 +243,31 @@ def get_git_upstream_commit(repo_root: Path) -> Optional[str]:
         return None
 
 
+def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path]) -> Optional[Path]:
+    """Recherche un fichier PDF compagnon compilé pour target_path ou son dossier."""
+    if not target_path and not base_dir:
+        return None
+
+    if target_path and target_path.suffix.lower() != ".pdf":
+        cand_same_stem = target_path.with_suffix(".pdf")
+        if cand_same_stem.is_file():
+            return cand_same_stem
+
+    if base_dir and base_dir.is_dir():
+        cand_main = base_dir / "main.pdf"
+        if cand_main.is_file():
+            return cand_main
+
+        pdfs = [p for p in base_dir.glob("*.pdf") if p.is_file() and not p.name.startswith(".")]
+        if len(pdfs) == 1:
+            return pdfs[0]
+        elif len(pdfs) > 1:
+            pdfs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return pdfs[0]
+
+    return None
+
+
 @mcp.tool()
 def get_diff_artifact(
     target: str,
@@ -291,7 +317,67 @@ def get_diff_artifact(
         # Contenu actuel sur le disque
         disk_content = None
         if target_path and target_path.exists() and target_path.is_file():
-            disk_content = target_path.read_text(encoding="utf-8", errors="replace")
+            if target_path.suffix.lower() == ".pdf":
+                # Gestion directe des fichiers PDF binaires sans conversion UTF-8
+                b_dir = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
+                b_dir.mkdir(parents=True, exist_ok=True)
+                pdf_name = target_path.name
+                dest_pdf = b_dir / pdf_name
+                try:
+                    if target_path.resolve() != dest_pdf.resolve():
+                        shutil.copy2(target_path, dest_pdf)
+                except Exception:
+                    pass
+
+                brain_posix = b_dir.resolve().as_posix().lstrip('/')
+                pdf_url = f"file:///{brain_posix}/{pdf_name}"
+
+                if artifact_name and artifact_name.strip():
+                    raw_target_name = artifact_name.strip()
+                    if raw_target_name.lower().endswith(".md"):
+                        raw_target_name = raw_target_name[:-3]
+                else:
+                    raw_target_name = target_path.stem or "document"
+                target_name = re.sub(r'[^a-zA-Z0-9_\-]+', '_', raw_target_name).strip('_') or "document"
+
+                tip_banner = (
+                    f"> [!TIP]\n"
+                    f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {pdf_name}]({pdf_url}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n\n"
+                )
+                source_posix = target_path.resolve().as_posix().lstrip('/')
+                source_link = f"📄 **Fichier Source** : [{pdf_name}](file:///{source_posix})\n\n"
+
+                slug = re.sub(r'[^a-zA-Z0-9_]+', '_', target_path.stem).upper()
+                md_content = (
+                    f"<!-- ARTIFACT: {slug}_PDF -->\n"
+                    f"<!-- SOURCE_FILE: {target} -->\n\n"
+                    f"# 📄 {target_path.stem.replace('_', ' ').title()}\n\n"
+                    f"{tip_banner}"
+                    f"{source_link}"
+                )
+                art_file = b_dir / f"{target_name}.md"
+                art_file.write_text(md_content, encoding="utf-8")
+                saved_path = art_file.as_posix()
+
+                res_data = {
+                    "status": "success",
+                    "saved_artifact_path": saved_path,
+                    "pdf_path": dest_pdf.as_posix(),
+                    "pdf_url": pdf_url,
+                    "diff_count": 0,
+                    "modified_sections": [],
+                    "baseline_commit": None,
+                    "style_verdict": "PASS",
+                    "soft_warnings_count": 0,
+                    "soft_warnings": [],
+                    "issues": [],
+                    "issues_count": 0
+                }
+                if return_content:
+                    res_data["artifact_content"] = md_content
+                return json.dumps(res_data, indent=2, ensure_ascii=False)
+            else:
+                disk_content = target_path.read_text(encoding="utf-8", errors="replace")
 
         # 1. Résolution de new_text
         if to_commit_id:
@@ -582,6 +668,24 @@ def get_diff_artifact(
                     save_style_audit(latest_id, audit_entry, target=target, storage_dir=cas.storage_dir)
                     recent_commits[0]["style_audit"] = audit_entry
 
+        # Détection et préparation du PDF compagnon compilé (ex. document LaTeX compilé)
+        companion_pdf_banner = None
+        companion_pdf = find_companion_pdf(target_path, base_dir)
+        if companion_pdf and companion_pdf.is_file():
+            b_dir_companion = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
+            b_dir_companion.mkdir(parents=True, exist_ok=True)
+            dest_companion = b_dir_companion / companion_pdf.name
+            try:
+                if companion_pdf.resolve() != dest_companion.resolve():
+                    shutil.copy2(companion_pdf, dest_companion)
+            except Exception:
+                pass
+            brain_posix = b_dir_companion.resolve().as_posix().lstrip('/')
+            companion_pdf_banner = (
+                f"> [!TIP]\n"
+                f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {companion_pdf.name}](file:///{brain_posix}/{companion_pdf.name}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
+            )
+
         artifact_content = ArtifactBuilder.assemble_brain_artifact(
             target_name=target_name,
             annotated_body=annotated_body,
@@ -595,7 +699,8 @@ def get_diff_artifact(
             mode=mode,
             soft_warnings=soft_warnings,
             repo_root=repo_root,
-            upstream_id=get_git_upstream_commit(repo_root) if repo_root else None
+            upstream_id=get_git_upstream_commit(repo_root) if repo_root else None,
+            companion_pdf_banner=companion_pdf_banner
         )
 
         # Injection du bloc d'obfuscation StealthRL dans l'en-tête du diff

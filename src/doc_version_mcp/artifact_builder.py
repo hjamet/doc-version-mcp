@@ -207,7 +207,8 @@ class ArtifactBuilder:
         mode: str = "paper",
         soft_warnings: Optional[List[Dict[str, Any]]] = None,
         repo_root: Optional[Path] = None,
-        upstream_id: Optional[str] = None
+        upstream_id: Optional[str] = None,
+        companion_pdf_banner: Optional[str] = None
     ) -> str:
         """Assemble l'artéfact complet destiné à Antigravity Brain."""
         header = cls.build_artifact_header(
@@ -292,7 +293,8 @@ class ArtifactBuilder:
             except Exception:
                 pass
 
-        full_doc = f"{header}{source_link_block}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
+        pdf_banner_block = f"{companion_pdf_banner.strip()}\n\n" if companion_pdf_banner and companion_pdf_banner.strip() else ""
+        full_doc = f"{header}{pdf_banner_block}{source_link_block}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
         if diff_explanation.strip():
             full_doc = cls.inject_explanation_callout(full_doc, diff_explanation.strip())
 
