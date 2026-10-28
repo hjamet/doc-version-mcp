@@ -722,9 +722,54 @@ def get_diff_artifact(
 
         # Sauvegarde sur disque : brain_dir si fourni, sinon répertoire temporaire dédié
         saved_path = None
+        pdf_artifact_path = None
         if brain_dir:
             b_dir = Path(brain_dir)
             b_dir.mkdir(parents=True, exist_ok=True)
+            b_posix = b_dir.resolve().as_posix().lstrip('/')
+
+            # Détection et copie automatique du PDF compilé pour annotation native Antigravity
+            stem = target_path.stem if target_path else target_name
+            target_dir = None
+            if target_path:
+                if target_path.is_file() or not target_path.exists():
+                    target_dir = target_path.parent
+                elif target_path.is_dir():
+                    target_dir = target_path
+
+            search_dirs_pdf = []
+            for d in [target_dir, base_dir]:
+                if d and d.is_dir() and d not in search_dirs_pdf:
+                    search_dirs_pdf.append(d)
+
+            found_pdf = None
+            for s_dir in search_dirs_pdf:
+                cand_stem = s_dir / f"{stem}.pdf"
+                cand_main = s_dir / "main.pdf"
+                if cand_stem.is_file():
+                    found_pdf = cand_stem
+                    break
+                elif cand_main.is_file():
+                    found_pdf = cand_main
+                    break
+
+            if not found_pdf and target_path and target_path.suffix.lower() == ".pdf" and target_path.is_file():
+                found_pdf = target_path
+
+            if found_pdf and found_pdf.is_file():
+                try:
+                    dest_pdf = b_dir / f"{stem}.pdf"
+                    shutil.copy2(found_pdf, dest_pdf)
+                    pdf_artifact_path = dest_pdf.as_posix()
+                    pdf_banner = (
+                        f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : "
+                        f"[Ouvrir et annoter {stem}.pdf](file:///{b_posix}/{stem}.pdf) "
+                        f"*(commentaires sur texte et captures d'écran annotées)*\n\n"
+                    )
+                    artifact_content = ArtifactBuilder.inject_pdf_banner(artifact_content, pdf_banner)
+                except Exception as e:
+                    pass
+
             artifact_content = ArtifactBuilder.format_images_for_brain(
                 artifact_content,
                 brain_target_dir=b_dir,
@@ -800,6 +845,9 @@ def get_diff_artifact(
             "issues_count": len(issues_list),
             "stealth_rewrite": stealth_report
         }
+
+        if pdf_artifact_path:
+            res_data["pdf_artifact_path"] = pdf_artifact_path
 
         if 'style_res' in locals() and style_res.stylometric_warnings:
             res_data["stylometric_warnings"] = style_res.stylometric_warnings

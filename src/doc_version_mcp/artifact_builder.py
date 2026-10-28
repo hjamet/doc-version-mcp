@@ -66,6 +66,41 @@ class ArtifactBuilder:
                 return f"{callout_str}{clean_body}"
 
     @classmethod
+    def inject_pdf_banner(cls, body: str, banner: str) -> str:
+        """
+        Injecte la bannière de visualisation et annotation native PDF en tête d'artéfact,
+        immédiatement après le frontmatter YAML et les métadonnées HTML d'en-tête.
+        """
+        if not banner or not banner.strip():
+            return body
+
+        clean_banner = banner.strip() + "\n\n"
+
+        if "Visualisation & Annotation PDF Native Antigravity" in body:
+            return body
+
+        fm_match = re.match(r'^(---\n.*?\n---\n*)', body, re.DOTALL)
+        if fm_match:
+            frontmatter_part = fm_match.group(1).rstrip() + "\n\n"
+            rest = body[fm_match.end():].lstrip()
+            meta_match = re.match(r'^((?:<!--.*?-->\n*)+)', rest, re.DOTALL)
+            if meta_match:
+                meta_part = meta_match.group(1).rstrip() + "\n\n"
+                content_after = rest[meta_match.end():].lstrip()
+                return f"{frontmatter_part}{meta_part}{clean_banner}{content_after}"
+            else:
+                return f"{frontmatter_part}{clean_banner}{rest}"
+        else:
+            meta_match = re.match(r'^((?:<!--.*?-->\n*)+)', body, re.DOTALL)
+            if meta_match:
+                meta_part = meta_match.group(1).rstrip() + "\n\n"
+                content_after = body[meta_match.end():].lstrip()
+                return f"{meta_part}{clean_banner}{content_after}"
+            else:
+                return f"{clean_banner}{body.lstrip()}"
+
+
+    @classmethod
     def build_artifact_header(
         cls,
         target_name: str,
