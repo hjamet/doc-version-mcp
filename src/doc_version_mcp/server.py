@@ -588,6 +588,15 @@ def get_diff_artifact(
 
         b_dir = Path(brain_dir) if brain_dir else None
 
+        # Préservation du texte final brut pour le bloc dépliant prêt à copier (mode draft)
+        def contains_explicit_html(t: str) -> bool:
+            if not t:
+                return False
+            return bool(re.search(r'<(?:table|h[1-6]|ul|ol|p)\b', t, re.IGNORECASE))
+
+        has_explicit_html_in_new = contains_explicit_html(new_text)
+        raw_final_text = new_text
+
         # Normalisation automatique HTML -> Markdown propre si fichier .html/.htm ou contenu HTML détecté
         if is_html_doc(old_text, target_path):
             old_text = HtmlToMarkdownConverter.convert_text(old_text, base_dir=base_dir, brain_dir=b_dir)
@@ -713,7 +722,7 @@ def get_diff_artifact(
             source_file=target,
             baseline_commit=baseline_commit_id,
             recent_commits=recent_commits,
-            final_content=new_text,
+            final_content=raw_final_text if (has_explicit_html_in_new and mode == "draft") else new_text,
             mode=mode,
             soft_warnings=soft_warnings,
             repo_root=repo_root,

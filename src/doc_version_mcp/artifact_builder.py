@@ -331,8 +331,9 @@ class ArtifactBuilder:
 
         is_virtual = bool(source_file and str(source_file).startswith(("virtual:", "scratch:")))
         is_tex = bool(source_file and str(source_file).lower().endswith(".tex"))
+        has_explicit_html = bool(re.search(r'<(?:table|h[1-6]|ul|ol|p)\b', text, re.IGNORECASE))
 
-        if is_virtual or (mode == "draft" and not is_tex and not text.strip().startswith(("\\section", "\\documentclass", "\\begin"))):
+        if is_virtual or has_explicit_html or (mode == "draft" and not is_tex and not text.strip().startswith(("\\section", "\\documentclass", "\\begin"))):
             return text.strip()
 
         from .diff_engine import DiffEngine

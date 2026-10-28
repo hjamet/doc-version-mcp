@@ -1657,6 +1657,74 @@ def test_direct_pdf_handling(tmp_path):
     assert res["pdf_path"] == copied_pdf.as_posix()
 
 
+def test_get_diff_artifact_preserves_explicit_html_in_draft_copy_block(temp_cas_dir, monkeypatch):
+    """
+    Valide que dans le bloc dépliant prêt à copier en mode draft,
+    le HTML brut (balises <p>, attributs style="...", <table>, <h4>)
+    est 100 % préservé sans être dépouillé par strip_html_and_styles.
+    """
+    test_cas = CASEngine(storage_dir=temp_cas_dir)
+    monkeypatch.setattr("doc_version_mcp.server.cas", test_cas)
+
+    html_content = (
+        "<p><strong>Subject: Test Announcement</strong></p>\n\n"
+        "<p>Dear students,</p>\n\n"
+        "<h4>Coaching Sessions</h4>\n\n"
+        '<table style="border-collapse: collapse; width: 100%; margin: 12px 0;">\n'
+        '  <thead>\n'
+        '    <tr style="background-color: #f4f6f8;">\n'
+        '      <th style="padding: 8px 12px;">Date</th>\n'
+        '      <th style="padding: 8px 12px;">Hours</th>\n'
+        '    </tr>\n'
+        '  </thead>\n'
+        '  <tbody>\n'
+        '    <tr style="border-bottom: 1px solid #e1e4e8;">\n'
+        '      <td style="padding: 8px 12px;">Thursday</td>\n'
+        '      <td style="padding: 8px 12px;">16:15 - 18:00</td>\n'
+        '    </tr>\n'
+        '  </tbody>\n'
+        '</table>\n\n'
+        "<p>Best regards,<br>Teaching Team</p>"
+    )
+
+    c0 = json.loads(commit_document(
+        target="virtual:test_announcement",
+        message="v0",
+        content="<p>Version initiale</p>",
+        author="henri",
+        mode="draft"
+    ))
+
+    res_json = get_diff_artifact(
+        target="virtual:test_announcement",
+        content=html_content,
+        diff_explanation="Test HTML preservation",
+        from_commit_id=c0["commit_id"],
+        mode="draft"
+    )
+    res = json.loads(res_json)
+    assert res["status"] == "success"
+
+    saved_art = Path(res["saved_artifact_path"]).read_text(encoding="utf-8")
+    assert "<details><summary>📋 Texte Final Prêt à Copier</summary>" in saved_art
+
+    # Extraction du bloc prêt à copier
+    copy_match = re.search(r'<details><summary>📋 Texte Final Prêt à Copier</summary>\s*```+text\s*(.*?)\s*```+\s*</details>', saved_art, re.DOTALL)
+    assert copy_match is not None, "Le bloc dépliant prêt à copier est introuvable"
+    copy_text = copy_match.group(1).strip()
+
+    # Vérification stricte de la préservation intégrale des balises HTML et styles
+    assert "<p><strong>Subject: Test Announcement</strong></p>" in copy_text
+    assert "<p>Dear students,</p>" in copy_text
+    assert "<h4>Coaching Sessions</h4>" in copy_text
+    assert '<table style="border-collapse: collapse; width: 100%; margin: 12px 0;">' in copy_text
+    assert '<tr style="background-color: #f4f6f8;">' in copy_text
+    assert '<th style="padding: 8px 12px;">Date</th>' in copy_text
+    assert '<td style="padding: 8px 12px;">Thursday</td>' in copy_text
+    assert '<td style="padding: 8px 12px;">16:15 - 18:00</td>' in copy_text
+    assert "<p>Best regards,<br>Teaching Team</p>" in copy_text
+
+
 
 
 
