@@ -629,17 +629,6 @@ def apply_stealth_to_modified_prose(
             "plan": plan
         })
 
-    if not modified_records and new_segs:
-        for s, e, seg in new_segs:
-            plan = plan_paragraph_sentence_rewrites("", seg, max_words=85)
-            modified_records.append({
-                "start": s,
-                "end": e,
-                "original_seg": seg,
-                "old_seg": "",
-                "plan": plan
-            })
-
     report: Dict[str, Any] = {
         "segments_modified": len(modified_records),
         "segments_rewritten": 0,
