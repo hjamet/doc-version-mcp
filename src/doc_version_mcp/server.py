@@ -21,7 +21,7 @@ from .diff_engine import DiffEngine
 from .latex_resolver import LatexToMarkdownConverter, BibTexParser
 from .html_resolver import HtmlToMarkdownConverter, is_html_doc
 from .draft_engine import DraftEngine
-from .artifact_builder import ArtifactBuilder
+from .artifact_builder import ArtifactBuilder, _resolve_compiled_pdf
 from .style_guard import check_style, run_preservation_validator, detect_language
 from .stealth_bridge import apply_stealth_to_modified_prose, format_stealth_callout
 
@@ -248,6 +248,11 @@ def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path], mo
     if mode == "draft" or (not target_path and not base_dir):
         return None
 
+    if target_path:
+        resolved = _resolve_compiled_pdf(target_path)
+        if resolved:
+            return resolved
+
     if target_path and target_path.suffix.lower() != ".pdf":
         cand_same_stem = target_path.with_suffix(".pdf")
         if cand_same_stem.is_file():
@@ -283,7 +288,8 @@ def get_diff_artifact(
     context_mode: str = "general",
     return_content: bool = False,
     block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD,
-    run_stealth: Optional[bool] = None
+    run_stealth: Optional[bool] = None,
+    pdf_path: Optional[str] = None
 ) -> str:
 
     """
@@ -346,7 +352,10 @@ def get_diff_artifact(
                     f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {pdf_name}]({pdf_url}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n\n"
                 )
                 source_posix = target_path.resolve().as_posix().lstrip('/')
-                source_link = f"📄 **Fichier Source** : [{pdf_name}](file:///{source_posix})\n\n"
+                source_link = (
+                    f"📄 **Fichier Source** : [{pdf_name}](file:///{source_posix})\n\n"
+                    f"📕 **PDF Compilé** : [{pdf_name}](file:///{source_posix})\n\n"
+                )
 
                 slug = re.sub(r'[^a-zA-Z0-9_]+', '_', target_path.stem).upper()
                 md_content = (
@@ -676,20 +685,23 @@ def get_diff_artifact(
 
         # Détection et préparation du PDF compagnon compilé (ex. document LaTeX compilé)
         companion_pdf_banner = None
-        companion_pdf = find_companion_pdf(target_path, base_dir, mode=mode)
+        pdf_artifact_path = None
+        compiled_pdf = _resolve_compiled_pdf(target_path, explicit_pdf_path=pdf_path)
+        companion_pdf = compiled_pdf or find_companion_pdf(target_path, base_dir, mode=mode)
         if companion_pdf and companion_pdf.is_file():
             b_dir_companion = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
             b_dir_companion.mkdir(parents=True, exist_ok=True)
-            dest_companion = b_dir_companion / companion_pdf.name
+            stem = target_path.stem if target_path else target_name
+            dest_companion = b_dir_companion / f"{stem}.pdf"
             try:
-                if companion_pdf.resolve() != dest_companion.resolve():
-                    shutil.copy2(companion_pdf, dest_companion)
+                shutil.copy2(companion_pdf, dest_companion)
+                pdf_artifact_path = dest_companion.as_posix()
             except Exception:
                 pass
             brain_posix = b_dir_companion.resolve().as_posix().lstrip('/')
             companion_pdf_banner = (
                 f"> [!TIP]\n"
-                f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {companion_pdf.name}](file:///{brain_posix}/{companion_pdf.name}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
+                f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {stem}.pdf](file:///{brain_posix}/{stem}.pdf) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
             )
 
         artifact_content = ArtifactBuilder.assemble_brain_artifact(
@@ -706,7 +718,9 @@ def get_diff_artifact(
             soft_warnings=soft_warnings,
             repo_root=repo_root,
             upstream_id=get_git_upstream_commit(repo_root) if repo_root else None,
-            companion_pdf_banner=companion_pdf_banner
+            companion_pdf_banner=companion_pdf_banner,
+            compiled_pdf=compiled_pdf,
+            explicit_pdf_path=pdf_path
         )
 
         # Injection du bloc d'obfuscation StealthRL dans l'en-tête du diff
@@ -722,53 +736,53 @@ def get_diff_artifact(
 
         # Sauvegarde sur disque : brain_dir si fourni, sinon répertoire temporaire dédié
         saved_path = None
-        pdf_artifact_path = None
         if brain_dir:
             b_dir = Path(brain_dir)
             b_dir.mkdir(parents=True, exist_ok=True)
             b_posix = b_dir.resolve().as_posix().lstrip('/')
 
-            # Détection et copie automatique du PDF compilé pour annotation native Antigravity
-            stem = target_path.stem if target_path else target_name
-            target_dir = None
-            if target_path:
-                if target_path.is_file() or not target_path.exists():
-                    target_dir = target_path.parent
-                elif target_path.is_dir():
-                    target_dir = target_path
+            # Détection et copie de secours du PDF si non déjà effectuée
+            if not pdf_artifact_path:
+                stem = target_path.stem if target_path else target_name
+                target_dir = None
+                if target_path:
+                    if target_path.is_file() or not target_path.exists():
+                        target_dir = target_path.parent
+                    elif target_path.is_dir():
+                        target_dir = target_path
 
-            search_dirs_pdf = []
-            for d in [target_dir, base_dir]:
-                if d and d.is_dir() and d not in search_dirs_pdf:
-                    search_dirs_pdf.append(d)
+                search_dirs_pdf = []
+                for d in [target_dir, base_dir]:
+                    if d and d.is_dir() and d not in search_dirs_pdf:
+                        search_dirs_pdf.append(d)
 
-            found_pdf = None
-            for s_dir in search_dirs_pdf:
-                cand_stem = s_dir / f"{stem}.pdf"
-                cand_main = s_dir / "main.pdf"
-                if cand_stem.is_file():
-                    found_pdf = cand_stem
-                    break
-                elif cand_main.is_file():
-                    found_pdf = cand_main
-                    break
+                found_pdf = None
+                for s_dir in search_dirs_pdf:
+                    cand_stem = s_dir / f"{stem}.pdf"
+                    cand_main = s_dir / "main.pdf"
+                    if cand_stem.is_file():
+                        found_pdf = cand_stem
+                        break
+                    elif cand_main.is_file():
+                        found_pdf = cand_main
+                        break
 
-            if not found_pdf and target_path and target_path.suffix.lower() == ".pdf" and target_path.is_file():
-                found_pdf = target_path
+                if not found_pdf and target_path and target_path.suffix.lower() == ".pdf" and target_path.is_file():
+                    found_pdf = target_path
 
-            if found_pdf and found_pdf.is_file():
-                try:
-                    dest_pdf = b_dir / f"{stem}.pdf"
-                    shutil.copy2(found_pdf, dest_pdf)
-                    pdf_artifact_path = dest_pdf.as_posix()
-                    pdf_banner = (
-                        f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : "
-                        f"[Ouvrir et annoter {stem}.pdf](file:///{b_posix}/{stem}.pdf) "
-                        f"*(commentaires sur texte et captures d'écran annotées)*\n\n"
-                    )
-                    artifact_content = ArtifactBuilder.inject_pdf_banner(artifact_content, pdf_banner)
-                except Exception as e:
-                    pass
+                if found_pdf and found_pdf.is_file():
+                    try:
+                        dest_pdf = b_dir / f"{stem}.pdf"
+                        shutil.copy2(found_pdf, dest_pdf)
+                        pdf_artifact_path = dest_pdf.as_posix()
+                        pdf_banner = (
+                            f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : "
+                            f"[Ouvrir et annoter {stem}.pdf](file:///{b_posix}/{stem}.pdf) "
+                            f"*(commentaires sur texte et captures d'écran annotées)*\n\n"
+                        )
+                        artifact_content = ArtifactBuilder.inject_pdf_banner(artifact_content, pdf_banner)
+                    except Exception:
+                        pass
 
             artifact_content = ArtifactBuilder.format_images_for_brain(
                 artifact_content,
@@ -845,6 +859,9 @@ def get_diff_artifact(
             "issues_count": len(issues_list),
             "stealth_rewrite": stealth_report
         }
+
+        if compiled_pdf:
+            res_data["compiled_pdf_path"] = compiled_pdf.as_posix()
 
         if pdf_artifact_path:
             res_data["pdf_artifact_path"] = pdf_artifact_path

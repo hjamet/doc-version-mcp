@@ -45,6 +45,18 @@
         "default": "paper",
         "type": "string"
       },
+      "pdf_path": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Chemin explicite vers le fichier PDF compilé associé (optionnel)"
+      },
       "return_content": {
         "default": false,
         "type": "boolean"

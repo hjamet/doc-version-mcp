@@ -9,9 +9,138 @@ import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_compiled_pdf(
+    target_path: Optional[Union[Path, str]],
+    explicit_pdf_path: Optional[str] = None
+) -> Optional[Path]:
+    """
+    Résout le fichier PDF compilé associé à target_path (ou explicit_pdf_path).
+
+    Logique :
+    1. Si explicit_pdf_path est fourni et existe sur disque, retourner son Path résolu.
+    2. Sinon, si target_path est un fichier réel sur disque (non virtual:) :
+       a) Si target_path.suffix.lower() == '.pdf' et existe, le retourner.
+       b) Chercher dans le même dossier : target_path.with_suffix('.pdf').
+       c) Si target_path est un sous-fichier (ex. tex/Declarations.tex ou sections/intro.tex),
+          parcourir le dossier parent et la racine du dépôt Git (jusqu'à 3 niveaux parents) :
+          - Chercher les fichiers .tex contenant \\documentclass qui mentionnent le nom/chemin relatif
+            du sous-fichier et dont le .pdf éponyme existe (ex. paper.tex -> paper.pdf).
+          - À défaut, s'il existe dans le dossier courant ou parent un fichier paper.pdf ou main.pdf compilé, le retourner.
+    """
+    if explicit_pdf_path:
+        exp = Path(explicit_pdf_path)
+        if not exp.is_absolute() and target_path and not str(target_path).startswith(("virtual:", "scratch:")):
+            tp = Path(target_path)
+            base = tp.parent if (tp.is_file() or not tp.exists()) else tp
+            cand = (base / exp).resolve()
+            if cand.is_file() or cand.exists():
+                return cand
+        exp = exp.resolve()
+        if exp.is_file() or exp.exists():
+            return exp
+
+    if not target_path:
+        return None
+
+    str_target = str(target_path).strip()
+    if str_target.startswith(("virtual:", "scratch:")):
+        return None
+
+    tp = Path(str_target)
+    try:
+        if not tp.is_file() and not tp.exists():
+            return None
+        tp = tp.resolve()
+    except Exception:
+        return None
+
+    # a) Si target_path.suffix.lower() == '.pdf' et existe
+    if tp.suffix.lower() == ".pdf" and tp.is_file():
+        return tp
+
+    # b) Chercher dans le même dossier : target_path.with_suffix('.pdf')
+    same_stem_pdf = tp.with_suffix(".pdf")
+    if same_stem_pdf.is_file():
+        return same_stem_pdf
+
+    # c) Sous-fichiers inclus et parcours jusqu'à 3 niveaux parents + Git root
+    current_dir = tp.parent
+    search_dirs: List[Path] = [current_dir]
+    curr = current_dir
+    for _ in range(3):
+        if curr.parent and curr.parent != curr:
+            curr = curr.parent
+            if curr not in search_dirs:
+                search_dirs.append(curr)
+
+    # Détection de la racine Git
+    curr_git = current_dir
+    git_root = None
+    while curr_git and curr_git.parent != curr_git:
+        if (curr_git / ".git").exists():
+            git_root = curr_git
+            break
+        curr_git = curr_git.parent
+    if git_root and git_root not in search_dirs:
+        search_dirs.append(git_root)
+
+    target_stem = tp.stem
+    target_name = tp.name
+
+    for s_dir in search_dirs:
+        if not s_dir.is_dir():
+            continue
+        try:
+            rel_path = tp.relative_to(s_dir).as_posix()
+            rel_stem = tp.relative_to(s_dir).with_suffix("").as_posix()
+        except ValueError:
+            rel_path = None
+            rel_stem = None
+
+        cand_patterns = {target_stem, target_name}
+        if rel_stem:
+            cand_patterns.add(rel_stem)
+            cand_patterns.add(rel_stem.replace('/', '\\'))
+        if rel_path:
+            cand_patterns.add(rel_path)
+            cand_patterns.add(rel_path.replace('/', '\\'))
+
+        try:
+            for cand_tex in s_dir.glob("*.tex"):
+                if cand_tex.resolve() == tp:
+                    continue
+                try:
+                    tex_content = cand_tex.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+
+                if "\\documentclass" in tex_content:
+                    for pat in cand_patterns:
+                        if pat and pat in tex_content:
+                            eponymous_pdf = cand_tex.with_suffix(".pdf")
+                            if eponymous_pdf.is_file():
+                                return eponymous_pdf.resolve()
+        except Exception:
+            pass
+
+    # À défaut, s'il existe dans le dossier courant ou parent un fichier paper.pdf ou main.pdf compilé
+    for s_dir in search_dirs:
+        if not s_dir.is_dir():
+            continue
+        cand_paper = s_dir / "paper.pdf"
+        if cand_paper.is_file():
+            return cand_paper.resolve()
+        cand_main = s_dir / "main.pdf"
+        if cand_main.is_file():
+            return cand_main.resolve()
+
+    return None
+
 
 
 class ArtifactBuilder:
@@ -243,7 +372,9 @@ class ArtifactBuilder:
         soft_warnings: Optional[List[Dict[str, Any]]] = None,
         repo_root: Optional[Path] = None,
         upstream_id: Optional[str] = None,
-        companion_pdf_banner: Optional[str] = None
+        companion_pdf_banner: Optional[str] = None,
+        compiled_pdf: Optional[Union[Path, str]] = None,
+        explicit_pdf_path: Optional[str] = None
     ) -> str:
         """Assemble l'artéfact complet destiné à Antigravity Brain."""
         header = cls.build_artifact_header(
@@ -316,15 +447,29 @@ class ArtifactBuilder:
                 w_rows.append(f"| {t} | {l} | `{term}` | {sug} |")
             warnings_block = "\n".join(w_rows) + "\n\n</details>\n\n---\n\n"
 
-        # 6. Lien cliquable vers le fichier source physique
+        # 6. Lien cliquable vers le fichier source physique et le PDF compilé associé
         source_link_block = ""
-        if source_file and not source_file.startswith("virtual:"):
+        if source_file and not str(source_file).startswith("virtual:"):
             try:
                 p = Path(source_file)
                 if p.is_file() or p.exists():
-                    posix_path = p.as_posix().lstrip('/')
+                    posix_path = p.resolve().as_posix().lstrip('/')
                     file_url = f"file:///{posix_path}"
                     source_link_block = f"📄 **Fichier Source** : [{p.name}]({file_url})\n\n"
+
+                    # Résolution du PDF compilé (explicite ou automatique)
+                    resolved_pdf = None
+                    if compiled_pdf:
+                        c_p = Path(compiled_pdf)
+                        if c_p.is_file() or c_p.exists():
+                            resolved_pdf = c_p.resolve()
+                    if not resolved_pdf:
+                        resolved_pdf = _resolve_compiled_pdf(p, explicit_pdf_path=explicit_pdf_path)
+
+                    if resolved_pdf and resolved_pdf.is_file():
+                        pdf_posix = resolved_pdf.resolve().as_posix().lstrip('/')
+                        pdf_url = f"file:///{pdf_posix}"
+                        source_link_block += f"📕 **PDF Compilé** : [{resolved_pdf.name}]({pdf_url})\n\n"
             except Exception:
                 pass
 

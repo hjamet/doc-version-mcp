@@ -8,7 +8,7 @@ from .cas_engine import CASEngine
 from .diff_engine import DiffEngine, SectionBlock
 from .latex_resolver import LatexMacroEngine, LatexToMarkdownConverter, BibTexParser
 from .draft_engine import DraftEngine
-from .artifact_builder import ArtifactBuilder
+from .artifact_builder import ArtifactBuilder, _resolve_compiled_pdf
 
 __all__ = [
     "CASEngine",
@@ -19,4 +19,5 @@ __all__ = [
     "BibTexParser",
     "DraftEngine",
     "ArtifactBuilder",
+    "_resolve_compiled_pdf",
 ]
