@@ -1,6 +1,6 @@
 {
   "name": "get_diff_artifact",
-  "description": "Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.\nSupporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).\nActive par défaut l'obfuscation automatique StealthRL (run_stealth=True) sur GPU en mode paper et draft.\nSynchronise automatiquement avec les commits Git si le fichier est dans un dépôt Git.",
+  "description": "Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.\nSupporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).\nStealthRL est désactivé par défaut (run_stealth=False).\nSynchronise automatiquement avec les commits Git si le fichier est dans un dépôt Git.",
   "parameters": {
     "additionalProperties": false,
     "properties": {
@@ -62,8 +62,8 @@
         "type": "boolean"
       },
       "run_stealth": {
-        "default": true,
-        "description": "Exécute l'obfuscation StealthRL Qwen-4B (True par défaut en paper et draft, False pour désactiver)",
+        "default": false,
+        "description": "Exécute l'obfuscation StealthRL Qwen-4B (False par défaut, True pour forcer l'exécution)",
         "type": "boolean"
       },
       "target": {

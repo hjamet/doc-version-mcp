@@ -288,7 +288,7 @@ def get_diff_artifact(
     context_mode: str = "general",
     return_content: bool = False,
     block_diff_threshold: float = DiffEngine.PARAGRAPH_BLOCK_DIFF_THRESHOLD,
-    run_stealth: Optional[bool] = None,
+    run_stealth: Optional[bool] = False,
     pdf_path: Optional[str] = None
 ) -> str:
 
@@ -296,6 +296,7 @@ def get_diff_artifact(
     Génère la vue différentielle chirurgicale AST et produit l'artéfact Markdown Antigravity.
     Supporte le mode paper (LaTeX/Markdown avec KaTeX) et le mode draft (audit syntaxique balises, rétention >=90%).
     Synchronise automatiquement avec les commits Git si le fichier est dans un dépôt Git.
+    StealthRL est désactivé par défaut (run_stealth=False) et ne s'exécute que sur demande explicite (run_stealth=True).
     """
     try:
         old_text = ""
@@ -527,8 +528,8 @@ def get_diff_artifact(
         if not old_text and disk_content is not None and content and disk_content.strip() != content.strip():
             old_text = disk_content
 
-        # Réécriture StealthRL automatique (activée par défaut quel que soit le mode hors suite pytest unitaire)
-        should_run_stealth = run_stealth if run_stealth is not None else (not bool(os.environ.get("PYTEST_CURRENT_TEST")))
+        # Réécriture StealthRL désactivée par défaut (ne s'exécute que si run_stealth=True est explicitement demandé)
+        should_run_stealth = bool(run_stealth)
         stealth_report: Dict[str, Any] = {"applied": False}
         parsed_allowed = [t.strip() for t in allowed_terms.split(",") if t.strip()] if allowed_terms else None
         pre_stealth_new_text = new_text
@@ -1155,7 +1156,7 @@ def main():
         p_diff.add_argument("--mode", default="paper", choices=["paper", "draft"], help="Operating mode")
         p_diff.add_argument("--brain-dir", default="", help="Brain directory to write artifact")
         p_diff.add_argument("--artifact-name", default="", help="Base name of output artifact")
-        p_diff.add_argument("--run-stealth", dest="run_stealth", action="store_true", default=None, help="Force execution of StealthRL")
+        p_diff.add_argument("--run-stealth", dest="run_stealth", action="store_true", default=False, help="Force execution of StealthRL (disabled by default)")
         p_diff.add_argument("--no-stealth", "--no-run-stealth", dest="run_stealth", action="store_false", help="Disable StealthRL")
 
         # restore

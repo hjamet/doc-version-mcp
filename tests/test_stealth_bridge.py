@@ -416,12 +416,12 @@ def test_apply_stealth_fallback_candidates_ranked_and_monotonicity(monkeypatch):
 
 
 def test_get_diff_artifact_stealth_default_in_draft_and_paper(monkeypatch, tmp_path):
-    """Valide que StealthRL est activé par défaut en mode draft et paper hors environnement pytest."""
+    """Valide que StealthRL est désactivé par défaut en mode draft et paper, et ne s'exécute que si run_stealth=True."""
     call_count = {"count": 0}
 
     def mock_apply_stealth(old_raw, new_raw, target_path, language, context_mode, allowed_terms, **kwargs):
         call_count["count"] += 1
-        rewritten = new_raw.replace("delve into", "explore")
+        rewritten = new_raw.replace("investigate", "examine")
         report = {
             "segments_modified": 1,
             "segments_rewritten": 1,
@@ -438,32 +438,43 @@ def test_get_diff_artifact_stealth_default_in_draft_and_paper(monkeypatch, tmp_p
 
     test_file = tmp_path / "draft.md"
     test_file.write_text("Introduction to our methodology.\n", encoding="utf-8")
-    new_draft = "Introduction to our methodology.\nWe delve into this problem.\n"
+    new_draft = "Introduction to our methodology.\nWe investigate this problem in depth.\n"
 
-    # Appel en mode draft sans spécifier run_stealth -> doit s'exécuter par défaut
-    res_draft = json.loads(get_diff_artifact(
+    # 1. Appel sans spécifier run_stealth -> doit être désactivé par défaut (call_count == 0)
+    res_default = json.loads(get_diff_artifact(
         target=str(test_file),
         diff_explanation="Update draft",
         content=new_draft,
         mode="draft",
         return_content=True
     ))
-    assert res_draft["status"] == "success"
-    assert res_draft.get("stealth_rewrite", {}).get("applied") is True
-    assert call_count["count"] == 1
+    assert res_default["status"] == "success"
+    assert res_default.get("stealth_rewrite", {}).get("applied") is False
+    assert call_count["count"] == 0
 
-    # 2. Appel avec run_stealth=False explicite -> doit être désactivé
-    clean_draft = "Introduction to our methodology.\nWe investigate this problem in depth.\n"
-    res_disabled = json.loads(get_diff_artifact(
+    # 2. Appel en mode paper sans spécifier run_stealth -> doit également être désactivé par défaut
+    res_paper_default = json.loads(get_diff_artifact(
         target=str(test_file),
-        diff_explanation="Update draft without stealth",
-        content=clean_draft,
-        mode="draft",
-        run_stealth=False,
+        diff_explanation="Update paper",
+        content=new_draft,
+        mode="paper",
         return_content=True
     ))
-    assert res_disabled["status"] == "success"
-    assert res_disabled.get("stealth_rewrite", {}).get("applied") is False
-    assert call_count["count"] == 1  # Pas d'incrément
+    assert res_paper_default["status"] == "success"
+    assert res_paper_default.get("stealth_rewrite", {}).get("applied") is False
+    assert call_count["count"] == 0
+
+    # 3. Appel avec run_stealth=True explicite -> doit s'exécuter
+    res_explicit = json.loads(get_diff_artifact(
+        target=str(test_file),
+        diff_explanation="Update draft with stealth",
+        content=new_draft,
+        mode="draft",
+        run_stealth=True,
+        return_content=True
+    ))
+    assert res_explicit["status"] == "success"
+    assert res_explicit.get("stealth_rewrite", {}).get("applied") is True
+    assert call_count["count"] == 1
 
 
