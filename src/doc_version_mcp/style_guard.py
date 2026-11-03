@@ -374,7 +374,12 @@ def scan_deterministic_hard_blockers(
     - Tier 1A stricts (sauf termes explicitement autorisés par l'utilisateur)
     """
     blockers = []
-    lines = text.splitlines()
+    # Masquage des commentaires HTML <!-- ... --> en préservant le décompte exact des lignes
+    def _mask_comment_span(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    clean_text = re.sub(r"<!--.*?-->", _mask_comment_span, text, flags=re.DOTALL)
+    lines = clean_text.splitlines()
     in_code_block = False
     terms_whitelist = allowed_terms or set()
 
@@ -400,9 +405,9 @@ def scan_deterministic_hard_blockers(
                 "suggestion": "Remplacer par une virgule, deux points, ou reformuler sans incise artificielle"
             })
 
-        # Double tiret '--' utilisé comme tiret d'incise (hors drapeaux CLI --arg)
-        dash_match = re.search(r"(?<=\s)--(?=\s)|(?<=\w)--(?=\w)|(?<=\s)--(?!-)", line)
-        if dash_match and not re.search(r"--[a-zA-Z0-9_\-]+", line):
+        # Double tiret '--' utilisé comme tiret d'incise (hors drapeaux CLI --arg et flèches --> / <--)
+        dash_match = re.search(r"(?<![<!])(?<=\s)--(?=\s)|(?<=\w)--(?=\w)|(?<![<!])(?<=\s)--(?![-|>])", line)
+        if dash_match and not re.search(r"(?:^|[\s\"'`(\[])--[a-zA-Z0-9_\-]+", line):
             blockers.append({
                 "type": "Hard Blocker: em-dash ('--')",
                 "line": idx,
