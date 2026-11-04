@@ -396,8 +396,16 @@ def scan_deterministic_hard_blockers(
         if re.match(r"^---+$", stripped) or re.match(r"^\|?\s*[-:]+\s*\|", stripped):
             continue
 
+        # Neutralisation des cibles de wikilinks Obsidian [[...]] pour ne pas déclencher de faux positif
+        # sur un nom de fichier réel du coffre contenant '--' ou '—'
+        line_clean = re.sub(r"\[\[[^\]]+\]\]", "", line)
+
+        # Les lignes de déclaration de skills du coffre sont exemptées du bloqueur em-dash
+        # (format prescrit par pomodoro-projets.md et task-tracking.md : - [[skills/...]] — <condition>)
+        is_skill_decl = bool(re.match(r"^\s*-\s*\[\[skills/[^\]]+\]\]\s*—\s*", line))
+
         # Em-dash littéral '—' (U+2014)
-        if "—" in line:
+        if not is_skill_decl and "—" in line_clean:
             blockers.append({
                 "type": "Hard Blocker: em-dash",
                 "line": idx,
@@ -405,9 +413,9 @@ def scan_deterministic_hard_blockers(
                 "suggestion": "Remplacer par une virgule, deux points, ou reformuler sans incise artificielle"
             })
 
-        # Double tiret '--' utilisé comme tiret d'incise (hors drapeaux CLI --arg et flèches --> / <--)
-        dash_match = re.search(r"(?<![<!])(?<=\s)--(?=\s)|(?<=\w)--(?=\w)|(?<![<!])(?<=\s)--(?![-|>])", line)
-        if dash_match and not re.search(r"(?:^|[\s\"'`(\[])--[a-zA-Z0-9_\-]+", line):
+        # Double tiret '--' utilisé comme tiret d'incise (hors drapeaux CLI --arg, flèches --> / <-- et hors wikilinks)
+        dash_match = re.search(r"(?<![<!])(?<=\s)--(?=\s)|(?<=\w)--(?=\w)|(?<![<!])(?<=\s)--(?![-|>])", line_clean)
+        if dash_match and not re.search(r"(?:^|[\s\"'`(\[])--[a-zA-Z0-9_\-]+", line_clean):
             blockers.append({
                 "type": "Hard Blocker: em-dash ('--')",
                 "line": idx,
@@ -598,6 +606,20 @@ def check_style(
         flags=re.DOTALL | re.IGNORECASE | re.MULTILINE
     )
 
+    # Neutralisation des cibles de wikilinks Obsidian [[...]] et des déclarations de skills
+    # pour le comptage global des em-dashes et les moteurs d'analyse externes (detect.js, scan français)
+    text_for_audit = re.sub(
+        r"(^\s*-\s*\[\[skills/[^\]]+\]\]\s*)—(\s*)",
+        r"\1:\2",
+        text_for_audit,
+        flags=re.MULTILINE
+    )
+    text_for_audit = re.sub(
+        r"\[\[([^\]]+)\]\]",
+        lambda m: "[[" + m.group(1).replace("—", " ").replace("--", "__") + "]]",
+        text_for_audit
+    )
+
     # 1. Exécution du scan déterministe local
     hard_blockers = scan_deterministic_hard_blockers(text_for_audit, language=effective_lang, allowed_terms=allowed_set)
     soft_warnings = []
@@ -637,6 +659,19 @@ def check_style(
 
         # Classification Hard Blockers (Tolérance 0 - P0/P1)
         if iss_type in NODE_HARD_BLOCKER_TYPES:
+            if iss_type == "em-dash":
+                # Vérifier si un em-dash réel (hors wikilinks et déclarations de skills) subsiste dans le texte
+                has_real_em_dash = False
+                for raw_l in text.splitlines():
+                    if re.match(r"^\s*-\s*\[\[skills/[^\]]+\]\]\s*—\s*", raw_l):
+                        continue
+                    clean_l = re.sub(r"\[\[[^\]]+\]\]", "", raw_l)
+                    if "—" in clean_l:
+                        has_real_em_dash = True
+                        break
+                if not has_real_em_dash:
+                    continue
+
             hard_blockers.append({
                 "type": f"Hard Blocker ({iss_type})",
                 "line": line_num,
