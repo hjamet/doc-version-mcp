@@ -194,9 +194,10 @@ def _resolve_wikilink_target(
     Gère les ancres (#...), les fichiers .md et non-.md (_agents/scripts-for-skills/..., images, etc.).
     """
     anchor = ""
-    target_name = raw_target
-    if "#" in raw_target:
-        target_name, anchor_part = raw_target.split("#", 1)
+    target_str = _clean_diff_html_keep_new(raw_target)
+    target_name = target_str
+    if "#" in target_str:
+        target_name, anchor_part = target_str.split("#", 1)
         target_name = target_name.strip()
         anchor = f"#{anchor_part.strip()}"
 
@@ -357,7 +358,8 @@ def convert_obsidian_wikilinks_for_antigravity(
             resolved_rel = f"_attachments/{clean_target}"
 
         resolved_rel = resolved_rel.lstrip("/\\")
-        encoded_url = _encode_relative_url(resolved_rel)
+        abs_img = (voicenotes_dir / resolved_rel).resolve().as_posix().lstrip("/")
+        encoded_url = "file:///" + urllib.parse.quote(abs_img, safe="/:#")
         alt_text = Path(clean_target).stem.replace("_", " ")
         return f"![{alt_text}]({encoded_url})"
 
@@ -395,8 +397,11 @@ def convert_obsidian_wikilinks_for_antigravity(
                 resolved_rel = f"notes/{norm_target}.md"
 
         resolved_rel = resolved_rel.lstrip("/\\")
+        abs_target = (voicenotes_dir / resolved_rel).resolve().as_posix().lstrip("/")
         clean_anchor = _clean_diff_html_keep_new(anchor)
-        encoded_url = _encode_relative_url(resolved_rel) + clean_anchor
+        encoded_url = "file:///" + urllib.parse.quote(abs_target, safe="/:#")
+        if clean_anchor:
+            encoded_url += clean_anchor
         display_text = clean_alias if clean_alias else (Path(target_name).stem if target_name else clean_target)
         return f"[{display_text}]({encoded_url})"
 
