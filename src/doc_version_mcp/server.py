@@ -248,6 +248,9 @@ def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path], mo
     if mode == "draft" or (not target_path and not base_dir):
         return None
 
+    if target_path and target_path.suffix.lower() == ".md":
+        return None
+
     if target_path:
         resolved = _resolve_compiled_pdf(target_path)
         if resolved:
@@ -389,6 +392,14 @@ def get_diff_artifact(
                 base_dir = target_path
             elif target_path.parent.exists():
                 base_dir = target_path.parent
+
+        is_md_target = (
+            (target_path and target_path.suffix.lower() == ".md")
+            or (isinstance(target, str) and target.lower().strip().endswith(".md"))
+            or (mode == "draft" and not str(target).lower().endswith(".pdf") and not str(target).lower().endswith(".tex"))
+        )
+        if is_md_target:
+            pdf_path = None
 
         # Détection Git
         is_git, repo_root, rel_git_path = (False, None, None)
@@ -745,23 +756,24 @@ def get_diff_artifact(
         # Détection et préparation du PDF compagnon compilé (ex. document LaTeX compilé)
         companion_pdf_banner = None
         pdf_artifact_path = None
-        compiled_pdf = _resolve_compiled_pdf(target_path, explicit_pdf_path=pdf_path)
-        companion_pdf = compiled_pdf or find_companion_pdf(target_path, base_dir, mode=mode)
-        if companion_pdf and companion_pdf.is_file():
-            b_dir_companion = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
-            b_dir_companion.mkdir(parents=True, exist_ok=True)
-            stem = target_path.stem if target_path else target_name
-            dest_companion = b_dir_companion / f"{stem}.pdf"
-            try:
-                shutil.copy2(companion_pdf, dest_companion)
-                pdf_artifact_path = dest_companion.as_posix()
-            except Exception:
-                pass
-            brain_posix = b_dir_companion.resolve().as_posix().lstrip('/')
-            companion_pdf_banner = (
-                f"> [!TIP]\n"
-                f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {stem}.pdf](file:///{brain_posix}/{stem}.pdf) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
-            )
+        if not is_md_target:
+            compiled_pdf = _resolve_compiled_pdf(target_path, explicit_pdf_path=pdf_path)
+            companion_pdf = compiled_pdf or find_companion_pdf(target_path, base_dir, mode=mode)
+            if companion_pdf and companion_pdf.is_file():
+                b_dir_companion = Path(brain_dir) if brain_dir else (Path(tempfile.gettempdir()) / "doc_version_artifacts")
+                b_dir_companion.mkdir(parents=True, exist_ok=True)
+                stem = target_path.stem if target_path else target_name
+                dest_companion = b_dir_companion / f"{stem}.pdf"
+                try:
+                    shutil.copy2(companion_pdf, dest_companion)
+                    pdf_artifact_path = dest_companion.as_posix()
+                except Exception:
+                    pass
+                brain_posix = b_dir_companion.resolve().as_posix().lstrip('/')
+                companion_pdf_banner = (
+                    f"> [!TIP]\n"
+                    f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {stem}.pdf](file:///{brain_posix}/{stem}.pdf) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
+                )
 
         artifact_content = ArtifactBuilder.assemble_brain_artifact(
             target_name=target_name,
@@ -804,7 +816,7 @@ def get_diff_artifact(
             b_posix = b_dir.resolve().as_posix().lstrip('/')
 
             # Détection et copie de secours du PDF si non déjà effectuée
-            if not pdf_artifact_path:
+            if not pdf_artifact_path and not is_md_target:
                 stem = target_path.stem if target_path else target_name
                 target_dir = None
                 if target_path:

@@ -130,9 +130,24 @@ def _resolve_compiled_pdf(
     return None
 
 
+def _clean_diff_html_keep_new(s: str) -> str:
+    """
+    Nettoie le HTML injecté par diff_engine dans un wikilink ou alias en conservant
+    uniquement le texte nouveau (ajouts / état actuel) et en purgeant les suppressions.
+    """
+    if not s:
+        return ""
+    # a) supprime d'abord les segments supprimés
+    s = re.sub(r'<del[^>]*>[\s\S]*?</del>', '', s)
+    s = re.sub(r'<span[^>]*#fee2e2[^>]*>[\s\S]*?</span>', '', s)
+    # b) retire ensuite les balises restantes
+    s = re.sub(r'</?(?:span|del|ins)[^>]*>', '', s)
+    return s.strip()
+
+
 def _encode_relative_url(rel_path_str: str) -> str:
-    """Encode uniquement les espaces en %20 sans altérer les slashes ni les accents/emojis."""
-    return rel_path_str.replace("\\", "/").replace(" ", "%20")
+    """Encode uniquement les espaces en %20 et les parenthèses sans altérer les slashes ni les accents/emojis."""
+    return rel_path_str.replace("\\", "/").replace(" ", "%20").replace("(", "%28").replace(")", "%29")
 
 
 def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -189,6 +204,10 @@ def _resolve_wikilink_target(
     if not norm_target:
         return None, anchor
 
+    # Si norm_target commence par notes/notes/, normaliser en notes/
+    while norm_target.lower().startswith("notes/notes/"):
+        norm_target = "notes/" + norm_target[len("notes/notes/"):]
+
     # 1. Test direct comme chemin relatif depuis voicenotes_dir
     p_direct = voicenotes_dir / norm_target
     if p_direct.is_file():
@@ -205,6 +224,21 @@ def _resolve_wikilink_target(
         except ValueError:
             return f"{norm_target}.md", anchor
 
+    # 2b. Test sous voicenotes_dir / "notes" / norm_target (ou .md)
+    if not norm_target.lower().startswith("notes/"):
+        p_notes = voicenotes_dir / "notes" / norm_target
+        if p_notes.is_file():
+            try:
+                return p_notes.relative_to(voicenotes_dir).as_posix(), anchor
+            except ValueError:
+                return f"notes/{norm_target}", anchor
+        p_notes_md = voicenotes_dir / "notes" / f"{norm_target}.md"
+        if p_notes_md.is_file():
+            try:
+                return p_notes_md.relative_to(voicenotes_dir).as_posix(), anchor
+            except ValueError:
+                return f"notes/{norm_target}.md", anchor
+
     # 3. Recherche dans les index légers (insensible à la casse)
     cand_keys = [
         norm_target.lower(),
@@ -212,6 +246,7 @@ def _resolve_wikilink_target(
         f"notes/{norm_target}.md".lower(),
         f"notes/{norm_target}".lower(),
         Path(norm_target).name.lower(),
+        f"{Path(norm_target).name}.md".lower(),
         Path(norm_target).stem.lower()
     ]
     for k in cand_keys:
@@ -292,7 +327,7 @@ def convert_obsidian_wikilinks_for_antigravity(
         inner = m.group(1).strip()
         parts = inner.split("|")
         raw_target = parts[0].strip()
-        clean_target = re.sub(r'</?(?:span|del|ins)[^>]*>', '', raw_target).strip()
+        clean_target = _clean_diff_html_keep_new(raw_target)
 
         # Priorité absolue : chercher d'abord dans _attachments/ (emplacement canonique) avant thumbnails/
         resolved_rel = None
@@ -335,22 +370,32 @@ def convert_obsidian_wikilinks_for_antigravity(
         raw_target = parts[0].strip()
         alias = parts[1].strip() if len(parts) > 1 else ""
 
-        # Nettoyage systématique des balises HTML résiduelles injectées par diff_engine
-        clean_target = re.sub(r'</?(?:span|del|ins)[^>]*>', '', raw_target).strip()
-        clean_alias = re.sub(r'</?(?:span|del|ins)[^>]*>', '', alias).strip() if alias else ""
+        # Nettoyage systématique des balises HTML résiduelles injectées par diff_engine en préservant le nouveau texte
+        clean_target = _clean_diff_html_keep_new(raw_target)
+        clean_alias = _clean_diff_html_keep_new(alias) if alias else ""
+
+        while clean_target.lower().startswith("notes/notes/"):
+            clean_target = "notes/" + clean_target[len("notes/notes/"):]
 
         resolved_rel, anchor = _resolve_wikilink_target(clean_target, voicenotes_dir, by_rel, by_stem)
 
         target_name = clean_target.split("#", 1)[0].strip() if "#" in clean_target else clean_target.strip()
+        while target_name.lower().startswith("notes/notes/"):
+            target_name = "notes/" + target_name[len("notes/notes/"):]
+
         if not resolved_rel:
-            norm_target = target_name.replace("\\", "/")
+            norm_target = target_name.replace("\\", "/").strip()
+            while norm_target.lower().startswith("notes/notes/"):
+                norm_target = "notes/" + norm_target[len("notes/notes/"):]
             if Path(norm_target).suffix:
                 resolved_rel = norm_target
+            elif "/" in norm_target:
+                resolved_rel = f"{norm_target}.md"
             else:
                 resolved_rel = f"notes/{norm_target}.md"
 
         resolved_rel = resolved_rel.lstrip("/\\")
-        clean_anchor = re.sub(r'</?(?:span|del|ins)[^>]*>', '', anchor).strip()
+        clean_anchor = _clean_diff_html_keep_new(anchor)
         encoded_url = _encode_relative_url(resolved_rel) + clean_anchor
         display_text = clean_alias if clean_alias else (Path(target_name).stem if target_name else clean_target)
         return f"[{display_text}]({encoded_url})"
@@ -431,8 +476,14 @@ class ArtifactBuilder:
         """
         Injecte la bannière de visualisation et annotation native PDF en tête d'artéfact,
         immédiatement après le frontmatter YAML et les métadonnées HTML d'en-tête.
+        Désactivé pour les notes Markdown.
         """
         if not banner or not banner.strip():
+            return body
+
+        # Désactiver si source_file est un fichier .md
+        m_src = re.search(r'<!--\s*SOURCE_FILE:\s*([^\n\r]+?)\s*-->', body)
+        if m_src and m_src.group(1).lower().strip().endswith(".md"):
             return body
 
         clean_banner = banner.strip() + "\n\n"
@@ -721,21 +772,24 @@ class ArtifactBuilder:
 
                     # Résolution du PDF compilé (explicite ou automatique)
                     resolved_pdf = None
-                    if compiled_pdf:
-                        c_p = Path(compiled_pdf)
-                        if c_p.is_file() or c_p.exists():
-                            resolved_pdf = c_p.resolve()
-                    if not resolved_pdf:
-                        resolved_pdf = _resolve_compiled_pdf(p, explicit_pdf_path=explicit_pdf_path)
+                    is_md_source = is_voicenotes_note or (source_file and str(source_file).lower().strip().endswith(".md"))
+                    if not is_md_source:
+                        if compiled_pdf:
+                            c_p = Path(compiled_pdf)
+                            if c_p.is_file() or c_p.exists():
+                                resolved_pdf = c_p.resolve()
+                        if not resolved_pdf:
+                            resolved_pdf = _resolve_compiled_pdf(p, explicit_pdf_path=explicit_pdf_path)
 
-                    if resolved_pdf and resolved_pdf.is_file():
-                        pdf_posix = resolved_pdf.resolve().as_posix().lstrip('/')
-                        pdf_url = f"file:///{pdf_posix}"
-                        source_link_block += f"📕 **PDF Compilé** : [{resolved_pdf.name}]({pdf_url})\n\n"
+                        if resolved_pdf and resolved_pdf.is_file():
+                            pdf_posix = resolved_pdf.resolve().as_posix().lstrip('/')
+                            pdf_url = f"file:///{pdf_posix}"
+                            source_link_block += f"📕 **PDF Compilé** : [{resolved_pdf.name}]({pdf_url})\n\n"
             except Exception:
                 pass
 
-        pdf_banner_block = f"{companion_pdf_banner.strip()}\n\n" if companion_pdf_banner and companion_pdf_banner.strip() else ""
+        is_md_doc = is_voicenotes_note or (source_file and str(source_file).lower().strip().endswith(".md"))
+        pdf_banner_block = "" if is_md_doc else (f"{companion_pdf_banner.strip()}\n\n" if companion_pdf_banner and companion_pdf_banner.strip() else "")
         full_doc = f"{header}{pdf_banner_block}{source_link_block}{copy_block}{warnings_block}{diff_block}{commits_block}{processed_body.rstrip()}\n"
         if diff_explanation.strip():
             full_doc = cls.inject_explanation_callout(full_doc, diff_explanation.strip())
