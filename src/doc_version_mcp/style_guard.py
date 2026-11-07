@@ -23,11 +23,13 @@ except ImportError:
 
 
 DEFAULT_DETECT_JS_PATHS = [
+    Path.home() / "Documents" / "VoiceNotes" / "_agents" / "scripts-for-skills" / "avoid-ai-writing" / "skills" / "ai-writing-detector" / "scripts" / "detect.js",
     Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
     Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\skills\ai-writing-detector\scripts\detect.js"),
 ]
 
 DEFAULT_VALIDATE_JS_PATHS = [
+    Path.home() / "Documents" / "VoiceNotes" / "_agents" / "scripts-for-skills" / "avoid-ai-writing" / "detector" / "validate.js",
     Path(r"C:\Users\hjamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\detector\validate.js"),
     Path(r"C:\Users\Jamet\Documents\VoiceNotes\_agents\scripts-for-skills\avoid-ai-writing\detector\validate.js"),
 ]
@@ -872,11 +874,9 @@ def save_style_audit(
         if env_dir:
             cas_dir = Path(env_dir)
         else:
-            default_cas = Path.home() / ".gemini" / "antigravity" / "cas_commits"
-            if default_cas.exists():
-                cas_dir = default_cas
-            else:
-                cas_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
+            vn_env = os.environ.get("VOICENOTES_DIR")
+            vn_dir = Path(vn_env).resolve() if vn_env else (Path.home() / "Documents" / "VoiceNotes").resolve()
+            cas_dir = vn_dir / "_agents" / "doc_version_cas"
 
     if cas_dir:
         cas_dir.mkdir(parents=True, exist_ok=True)
@@ -972,11 +972,9 @@ def load_style_audit(
         if env_dir:
             cas_dir = Path(env_dir)
         else:
-            default_cas = Path.home() / ".gemini" / "antigravity" / "cas_commits"
-            if default_cas.exists():
-                cas_dir = default_cas
-            else:
-                cas_dir = Path(tempfile.gettempdir()) / "doc_version_commits"
+            vn_env = os.environ.get("VOICENOTES_DIR")
+            vn_dir = Path(vn_env).resolve() if vn_env else (Path.home() / "Documents" / "VoiceNotes").resolve()
+            cas_dir = vn_dir / "_agents" / "doc_version_cas"
 
     if cas_dir:
         audit_file = cas_dir / "style_audit.json"

@@ -217,7 +217,8 @@ Write-Host "  [OK] Environnement virtuel configure : $VenvPython" -ForegroundCol
 # ------------------------------------------------------------------------------
 Write-Host "[5/8] Initialisation du stockage CAS..." -ForegroundColor Yellow
 
-$casBase = Join-Path $env:USERPROFILE ".gemini\antigravity\cas_commits"
+$vnBase = if ($env:VOICENOTES_DIR -and (Test-Path $env:VOICENOTES_DIR)) { $env:VOICENOTES_DIR } else { Join-Path $env:USERPROFILE "Documents\VoiceNotes" }
+$casBase = Join-Path $vnBase "_agents\doc_version_cas"
 $casCommits = Join-Path $casBase "commits"
 $casObjects = Join-Path $casBase "objects"
 
