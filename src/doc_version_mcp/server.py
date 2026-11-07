@@ -698,10 +698,17 @@ def get_diff_artifact(
         if old_text and new_text and old_text.strip() != new_text.strip():
             preservation_result = run_preservation_validator(old_text, new_text)
 
+        # Pour les notes du coffre VoiceNotes (is_voicenotes_target), retirer systématiquement le frontmatter YAML
+        # en tête sur old_text et new_text pour le calcul de diff, afin qu'aucun bloc diff ---/tags: n'apparaisse
+        old_content_for_diff = old_text
+        new_content_for_diff = new_text
+        if is_voicenotes_target:
+            old_content_for_diff = re.sub(r"\A---\r?\n[\s\S]*?\r?\n---\r?\n*", "", old_text.lstrip())
+            new_content_for_diff = re.sub(r"\A---\r?\n[\s\S]*?\r?\n---\r?\n*", "", new_text.lstrip())
 
         annotated_body, tree_toc, diff_count, mod_sections = DiffEngine.generate_diff_annotated_body(
-            old_text=old_text,
-            new_text=new_text,
+            old_text=old_content_for_diff,
+            new_text=new_content_for_diff,
             is_collab=False,
             author_name="agent",
             block_diff_threshold=block_diff_threshold

@@ -250,13 +250,14 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     by_stem, by_rel = _build_voicenotes_index(voicenotes_dir)
 
-    # 1. Extraction et protection des blocs de code multi-lignes fencés (```...```)
+    # 1. Extraction et protection des vrais blocs de code multi-lignes fencés (```...``` ou ~~~...~~~)
     code_blocks: List[str] = []
     def save_code(m):
         code_blocks.append(m.group(0))
         return f"@@DOC_VERSION_CODE_BLOCK_{len(code_blocks) - 1}@@"
 
-    protected_text = re.sub(r'```[\s\S]*?```', save_code, markdown_text)
+    fenced_block_pattern = re.compile(r'^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$', re.MULTILINE)
+    protected_text = fenced_block_pattern.sub(save_code, markdown_text)
 
     # 2. Remplacement des `[[...]]` ou `![[...]]` entourés par inadvertance de simples backticks
     # dont la cible correspond à un fichier réel du coffre (ou contient '/' ou '|') par le wikilink nu
@@ -282,25 +283,27 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     protected_text = re.sub(r'`(\!?\[\[([^\]\n]+)\]\])`', unbacktick_wikilink, protected_text)
 
-    # 3. Extraction et protection des blocs de code inline restants (`...`)
-    protected_text = re.sub(r'`[^`\n]+`', save_code, protected_text)
+    # 3. Extraction et protection des spans de code inline restants (`...`, ````...````, etc.)
+    inline_span_pattern = re.compile(r'(?<!`)(`+)(?!\[\[)(.+?)(?<!`)\1(?!`)')
+    protected_text = inline_span_pattern.sub(save_code, protected_text)
 
     # 4. Conversion des images ![[Cible]] ou ![[Cible|Largeur]]
     def repl_img(m):
         inner = m.group(1).strip()
         parts = inner.split("|")
         raw_target = parts[0].strip()
+        clean_target = re.sub(r'</?(?:span|del|ins)[^>]*>', '', raw_target).strip()
 
         # Priorité absolue : chercher d'abord dans _attachments/ (emplacement canonique) avant thumbnails/
         resolved_rel = None
-        direct_attachment = voicenotes_dir / "_attachments" / raw_target
+        direct_attachment = voicenotes_dir / "_attachments" / clean_target
         if direct_attachment.is_file():
-            resolved_rel = f"_attachments/{raw_target}"
+            resolved_rel = f"_attachments/{clean_target}"
         else:
             cand_keys = [
-                f"_attachments/{raw_target}".lower(),
-                raw_target.lower(),
-                Path(raw_target).stem.lower()
+                f"_attachments/{clean_target}".lower(),
+                clean_target.lower(),
+                Path(clean_target).stem.lower()
             ]
             for k in cand_keys:
                 if k in by_rel and by_rel[k].startswith("_attachments/"):
@@ -316,11 +319,11 @@ def convert_obsidian_wikilinks_for_antigravity(
                         break
 
         if not resolved_rel:
-            resolved_rel = f"_attachments/{raw_target}"
+            resolved_rel = f"_attachments/{clean_target}"
 
         resolved_rel = resolved_rel.lstrip("/\\")
         encoded_url = _encode_relative_url(resolved_rel)
-        alt_text = Path(raw_target).stem.replace("_", " ")
+        alt_text = Path(clean_target).stem.replace("_", " ")
         return f"![{alt_text}]({encoded_url})"
 
     protected_text = re.sub(r'!\[\[(.*?)\]\]', repl_img, protected_text)
@@ -332,9 +335,13 @@ def convert_obsidian_wikilinks_for_antigravity(
         raw_target = parts[0].strip()
         alias = parts[1].strip() if len(parts) > 1 else ""
 
-        resolved_rel, anchor = _resolve_wikilink_target(raw_target, voicenotes_dir, by_rel, by_stem)
+        # Nettoyage systématique des balises HTML résiduelles injectées par diff_engine
+        clean_target = re.sub(r'</?(?:span|del|ins)[^>]*>', '', raw_target).strip()
+        clean_alias = re.sub(r'</?(?:span|del|ins)[^>]*>', '', alias).strip() if alias else ""
 
-        target_name = raw_target.split("#", 1)[0].strip() if "#" in raw_target else raw_target.strip()
+        resolved_rel, anchor = _resolve_wikilink_target(clean_target, voicenotes_dir, by_rel, by_stem)
+
+        target_name = clean_target.split("#", 1)[0].strip() if "#" in clean_target else clean_target.strip()
         if not resolved_rel:
             norm_target = target_name.replace("\\", "/")
             if Path(norm_target).suffix:
@@ -343,18 +350,29 @@ def convert_obsidian_wikilinks_for_antigravity(
                 resolved_rel = f"notes/{norm_target}.md"
 
         resolved_rel = resolved_rel.lstrip("/\\")
-        encoded_url = _encode_relative_url(resolved_rel) + anchor
-        display_text = alias if alias else (Path(target_name).stem if target_name else raw_target)
+        clean_anchor = re.sub(r'</?(?:span|del|ins)[^>]*>', '', anchor).strip()
+        encoded_url = _encode_relative_url(resolved_rel) + clean_anchor
+        display_text = clean_alias if clean_alias else (Path(target_name).stem if target_name else clean_target)
         return f"[{display_text}]({encoded_url})"
 
     protected_text = re.sub(r'\[\[(.*?)\]\]', repl_link, protected_text)
 
-    # 6. Restauration des zones de code
+    # 6. Restauration des zones de code (multi-passes pour imbrications éventuelles)
     def restore_code(m):
         idx = int(m.group(1))
-        return code_blocks[idx]
+        if 0 <= idx < len(code_blocks):
+            return code_blocks[idx]
+        return m.group(0)
 
-    return re.sub(r'@@DOC_VERSION_CODE_BLOCK_(\d+)@@', restore_code, protected_text)
+    for _ in range(10):
+        if "@@DOC_VERSION_CODE_BLOCK_" not in protected_text:
+            break
+        protected_text = re.sub(r'@@DOC_VERSION_CODE_BLOCK_(\d+)@@', restore_code, protected_text)
+
+    if "@@DOC_VERSION_CODE_BLOCK_" in protected_text:
+        raise ValueError("Erreur critique: des jetons @@DOC_VERSION_CODE_BLOCK_ subsistent après restauration !")
+
+    return protected_text
 
 
 class ArtifactBuilder:
