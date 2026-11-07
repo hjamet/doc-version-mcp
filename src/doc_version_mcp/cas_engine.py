@@ -11,7 +11,7 @@ import tempfile
 import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Set, Union
 
 
 def get_voicenotes_dir() -> Path:
@@ -443,13 +443,16 @@ class CASEngine:
     def prune_stale_targets(
         self,
         max_age_days: int = 14,
-        protected_targets: Optional[Set[str]] = None
+        protected_targets: Optional[Union[Set[str], List[str]]] = None
     ) -> Dict[str, Any]:
         """
         Ménage automatique TTL : supprime les snapshots/blobs inactifs depuis plus de max_age_days
         ainsi que leurs fichiers 🤖 <Nom>.md associés dans _agents/project_diffs/.
         Les cibles protégées (protected_targets) sont préservées.
+        Appelle prune_expired(ttl_days=max_age_days, keep_baselines=True).
         """
+        expired_res = self.prune_expired(ttl_days=max_age_days, keep_baselines=True)
+
         now = datetime.now(timezone.utc)
         vn_dir = get_voicenotes_dir()
         diffs_dir = vn_dir / "_agents" / "project_diffs"
@@ -533,8 +536,12 @@ class CASEngine:
 
         return {
             "pruned_targets_count": len(pruned_targets),
-            "deleted_commits_count": deleted_commits_count,
-            "deleted_artifacts_count": deleted_artifacts_count
+            "deleted_commits_count": deleted_commits_count + expired_res.get("pruned_commits_count", 0),
+            "deleted_artifacts_count": deleted_artifacts_count,
+            "pruned_blobs_count": expired_res.get("pruned_blobs_count", 0),
+            "freed_bytes": expired_res.get("freed_bytes", 0),
+            "remaining_commits_count": expired_res.get("remaining_commits_count", 0),
+            "current_cas_size_bytes": expired_res.get("current_cas_size_bytes", 0)
         }
 
     def prune_expired(
@@ -547,8 +554,6 @@ class CASEngine:
         Purge les commits expirés selon le TTL (sauf is_pinned si keep_baselines),
         régule la taille totale sous max_mb et supprime les blobs orphelins.
         """
-        stale_res = self.prune_stale_targets(max_age_days=ttl_days)
-
         now = datetime.now(timezone.utc)
         all_commits = self.list_snapshots(limit=100000)
 
@@ -656,9 +661,7 @@ class CASEngine:
         self._save_index(index_data)
 
         return {
-            "pruned_targets_count": stale_res.get("pruned_targets_count", 0),
-            "deleted_artifacts_count": stale_res.get("deleted_artifacts_count", 0),
-            "pruned_commits_count": len(pruned_commit_ids) + stale_res.get("deleted_commits_count", 0),
+            "pruned_commits_count": len(pruned_commit_ids),
             "pruned_blobs_count": pruned_blobs_count,
             "freed_bytes": freed_blob_bytes,
             "remaining_commits_count": len(kept_commit_ids),

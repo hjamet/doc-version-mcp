@@ -371,7 +371,11 @@ def get_diff_artifact(
         is_virtual = str(target).startswith(("virtual:", "scratch:"))
         target_path = Path(target) if (target and not is_virtual) else None
         if target_path and not target_path.is_absolute():
-            target_path = target_path.resolve()
+            vn_cand = get_voicenotes_dir() / target
+            if vn_cand.exists():
+                target_path = vn_cand.resolve()
+            else:
+                target_path = target_path.resolve()
 
         base_dir = None
         if target_path:
@@ -642,12 +646,36 @@ def get_diff_artifact(
         # 3. Boucle bloquante déterministe avoid-ai-writing
         soft_warnings = []
         style_verdict = "PASS"
+        is_voicenotes_target = False
+        try:
+            vn_dir = get_voicenotes_dir().resolve()
+            vn_posix = vn_dir.as_posix().lower()
+            if target_path:
+                tp_posix = target_path.resolve().as_posix().lower()
+                if tp_posix == vn_posix or tp_posix.startswith(vn_posix + "/"):
+                    is_voicenotes_target = True
+            if not is_voicenotes_target and not is_virtual:
+                t_str = str(target).strip().replace("\\", "/")
+                cand = (vn_dir / t_str).resolve()
+                if cand.exists() or "/voicenotes/" in ("/" + t_str.lower() + "/"):
+                    is_voicenotes_target = True
+        except Exception:
+            pass
+
         if new_text and new_text.strip():
             style_res = check_style(new_text, language=language, context_mode=context_mode, allowed_terms=parsed_allowed)
             style_verdict = style_res.verdict
             if style_res.verdict == "FAIL":
-                raise ValueError(style_res.error_report)
-            if style_res.verdict == "WARN":
+                if is_voicenotes_target:
+                    # Exemption automatique pour les notes du coffre VoiceNotes/
+                    # (qui contiennent légitimement listes à puces, blocs de citation, tirets em-dash)
+                    style_verdict = "WARN"
+                    soft_warnings = list(style_res.soft_warnings) + [
+                        f"[EXEMPTION COFFRE VOICENOTES] Style Guard bloquant FAIL désactivé pour note Obsidian : {style_res.hard_violations[:3]}"
+                    ]
+                else:
+                    raise ValueError(style_res.error_report)
+            elif style_res.verdict == "WARN":
                 soft_warnings = style_res.soft_warnings
 
         # 4. Validation de préservation structurelle (validate.js)
