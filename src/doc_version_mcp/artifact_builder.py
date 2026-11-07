@@ -131,16 +131,15 @@ def _resolve_compiled_pdf(
 
 
 def _encode_relative_url(rel_path_str: str) -> str:
-    """Encode les espaces en %20 dans chaque composant d'un chemin relatif sans altérer les slashes."""
-    parts = rel_path_str.replace("\\", "/").split("/")
-    encoded_parts = [urllib.parse.quote(p, safe=".:-") for p in parts]
-    return "/".join(encoded_parts)
+    """Encode uniquement les espaces en %20 sans altérer les slashes ni les accents/emojis."""
+    return rel_path_str.replace("\\", "/").replace(" ", "%20")
 
 
 def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Construit un index léger des fichiers de VoiceNotes.
     Retourne (files_by_stem, files_by_rel_path).
+    Donne la priorité absolue à _attachments/ sur les autres dossiers (thumbnails, cache, etc.).
     Ignore .git, .obsidian, node_modules, .trash, .venv.
     """
     by_stem: Dict[str, str] = {}
@@ -158,10 +157,12 @@ def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[
                 rel = p.relative_to(voicenotes_dir).as_posix()
             except ValueError:
                 continue
+            is_attachment = rel.startswith("_attachments/")
             by_rel[rel.lower()] = rel
-            by_rel[f.lower()] = rel
+            if f.lower() not in by_rel or is_attachment:
+                by_rel[f.lower()] = rel
             stem_lower = p.stem.lower()
-            if stem_lower not in by_stem:
+            if stem_lower not in by_stem or is_attachment:
                 by_stem[stem_lower] = rel
     return by_stem, by_rel
 
@@ -206,19 +207,29 @@ def convert_obsidian_wikilinks_for_antigravity(
         parts = inner.split("|")
         raw_target = parts[0].strip()
 
-        cand_keys = [
-            raw_target.lower(),
-            f"_attachments/{raw_target}".lower(),
-            Path(raw_target).stem.lower()
-        ]
+        # Priorité absolue : chercher d'abord dans _attachments/ (emplacement canonique) avant thumbnails/
         resolved_rel = None
-        for k in cand_keys:
-            if k in by_rel:
-                resolved_rel = by_rel[k]
-                break
-            if k in by_stem:
-                resolved_rel = by_stem[k]
-                break
+        direct_attachment = voicenotes_dir / "_attachments" / raw_target
+        if direct_attachment.is_file():
+            resolved_rel = f"_attachments/{raw_target}"
+        else:
+            cand_keys = [
+                f"_attachments/{raw_target}".lower(),
+                raw_target.lower(),
+                Path(raw_target).stem.lower()
+            ]
+            for k in cand_keys:
+                if k in by_rel and by_rel[k].startswith("_attachments/"):
+                    resolved_rel = by_rel[k]
+                    break
+            if not resolved_rel:
+                for k in cand_keys:
+                    if k in by_rel:
+                        resolved_rel = by_rel[k]
+                        break
+                    if k in by_stem:
+                        resolved_rel = by_stem[k]
+                        break
 
         if not resolved_rel:
             resolved_rel = f"_attachments/{raw_target}"
@@ -382,11 +393,7 @@ class ArtifactBuilder:
         baseline_commit: Optional[str] = None,
         image_rel: Optional[str] = None
     ) -> str:
-        """Construit le bloc YAML frontmatter et métadonnées HTML en tête d'artéfact."""
-        parts = []
-        if image_rel:
-            parts.append(f"---\nImage: \"[[{image_rel}]]\"\n---\n")
-
+        """Construit les métadonnées HTML en tête d'artéfact (commence directement par <!-- ARTIFACT: ... --> sans frontmatter YAML)."""
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         slug = re.sub(r'[^a-zA-Z0-9_]+', '_', target_name).upper()
         meta = [f"<!-- ARTIFACT: {slug}_MANUSCRIPT -->"]
@@ -396,8 +403,7 @@ class ArtifactBuilder:
             meta.append(f"<!-- BASELINE_COMMIT: {baseline_commit[:8]} -->")
         meta.append(f"<!-- Generated at: {now_str} -->\n")
 
-        parts.append("\n".join(meta))
-        return "".join(parts)
+        return "\n".join(meta)
 
     @classmethod
     def build_recent_commits_table(
@@ -542,6 +548,31 @@ class ArtifactBuilder:
             artifact_dir=diffs_dir
         )
 
+        # Détection si source_file est une note .md située dans VoiceNotes/
+        is_voicenotes_note = False
+        if source_file and not str(source_file).startswith(("virtual:", "scratch:")):
+            try:
+                vn_dir_res = vn_dir.resolve()
+                sf_p = Path(source_file)
+                if not sf_p.is_absolute():
+                    sf_p = (vn_dir_res / sf_p).resolve()
+                else:
+                    sf_p = sf_p.resolve()
+
+                if sf_p.suffix.lower() == ".md":
+                    try:
+                        sf_p.relative_to(vn_dir_res)
+                        is_voicenotes_note = True
+                    except ValueError:
+                        pass
+            except Exception:
+                pass
+
+        if is_voicenotes_note:
+            # Retrait du frontmatter YAML initial inchangé en tête du corps annoté d'une note .md
+            # afin qu'il ne s'affiche pas comme de fausses lignes tags: / priority: / status: au milieu de l'artéfact
+            processed_body = re.sub(r'^---\r?\n[\s\S]*?\r?\n---\r?\n*', '', processed_body.lstrip())
+
         if diff_count > 0:
             diff_block = (
                 f"{cls.DIFF_SUMMARY_HEADER}\n\n"
@@ -571,8 +602,10 @@ class ArtifactBuilder:
         )
 
         # 4. Bloc dépliant de texte final prêt à copier (mode draft)
+        # Omis pour les notes .md de VoiceNotes/ (allègement de 50 %, la note existe déjà sur disque)
+        # Maintenu impérativement pour virtual:* et les fichiers hors VoiceNotes/
         copy_block = ""
-        if mode == "draft" and final_content and final_content.strip():
+        if not is_voicenotes_note and mode == "draft" and final_content and final_content.strip():
             clean_copy = cls.clean_for_copy(final_content, source_file=source_file, mode=mode)
             fence = cls.get_dynamic_fence(clean_copy, min_fence_len=4)
             copy_block = (
