@@ -380,16 +380,20 @@ class CASEngine:
         self,
         target: str = "",
         limit: int = 10,
-        mode: str = ""
+        mode: str = "",
+        target_filter: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Liste les snapshots ordonnés par date décroissante,
         avec filtrage optionnel par cible et mode.
         """
+        if target_filter and not target:
+            target = target_filter
         commits: List[Dict[str, Any]] = []
-        norm_filter = normalize_target_key(target).lower() if target else ""
-        raw_target_lower = target.strip().replace("\\", "/").lower() if target else ""
-        raw_stem_lower = Path(target).stem.lower() if target else ""
+        raw_target = target.strip()
+        norm_filter = normalize_target_key(raw_target).lower() if raw_target else ""
+        raw_target_lower = raw_target.replace("\\", "/").lower() if raw_target else ""
+        has_path_or_prefix = any(sep in raw_target for sep in ("/", "\\", ":")) if raw_target else False
 
         for f in self.commits_dir.glob("*.json"):
             try:
@@ -399,14 +403,14 @@ class CASEngine:
                 c_mode = data.get("mode", "").lower()
 
                 if norm_filter:
-                    matches = (
-                        c_norm == norm_filter or
-                        norm_filter in c_norm or
-                        c_norm in norm_filter or
-                        raw_target_lower in c_target.lower() or
-                        Path(c_target).name.lower() == raw_target_lower or
-                        Path(c_norm).stem.lower() == raw_stem_lower
-                    )
+                    if has_path_or_prefix:
+                        matches = (c_norm == norm_filter)
+                    else:
+                        matches = (
+                            c_norm == norm_filter or
+                            Path(c_norm).name.lower() == raw_target_lower or
+                            Path(c_target).name.lower() == raw_target_lower
+                        )
                     if not matches:
                         continue
                 if mode and (mode.lower() != c_mode):

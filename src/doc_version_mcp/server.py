@@ -289,6 +289,7 @@ def resolve_diff_artifact_path(target: str, cas: Optional[CASEngine] = None) -> 
         if "_" in clean_subj and " " not in clean_subj:
             clean_subj = clean_subj.replace("_", " ")
         clean_subj = re.sub(r'[<>:"/\\|?*]', '', clean_subj).strip()
+        clean_subj = re.sub(r'^(?:🤖\s*)+', '', clean_subj).strip()
         if not clean_subj:
             clean_subj = "Document"
         return project_diffs_dir / f"🤖 {clean_subj}.md"
@@ -313,12 +314,13 @@ def resolve_diff_artifact_path(target: str, cas: Optional[CASEngine] = None) -> 
                             homonyms.append(rel)
                         except Exception:
                             pass
-        if len(homonyms) > 1 and parent_name and parent_name not in (".", ""):
+        clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+        clean_stem = re.sub(r'^(?:🤖\s*)+', '', clean_stem).strip()
+        if len(homonyms) > 1 and parent_name and parent_name not in (".", "") and parent_name.lower() != "notes":
             clean_parent = re.sub(r'[<>:"/\\|?*]', '', parent_name).strip()
-            clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+            clean_parent = re.sub(r'^(?:🤖\s*)+', '', clean_parent).strip()
             return project_diffs_dir / f"🤖 {clean_parent} — {clean_stem}.md"
         else:
-            clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
             return project_diffs_dir / f"🤖 {clean_stem}.md"
     else:
         # Fichier hors de VoiceNotes (ex. ~/Documents/code/ecir-2027/main.tex)
@@ -332,7 +334,9 @@ def resolve_diff_artifact_path(target: str, cas: Optional[CASEngine] = None) -> 
                 parent_name = posix_parts[code_idx + 1]
 
         clean_parent = re.sub(r'[<>:"/\\|?*]', '', parent_name).strip()
+        clean_parent = re.sub(r'^(?:🤖\s*)+', '', clean_parent).strip()
         clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+        clean_stem = re.sub(r'^(?:🤖\s*)+', '', clean_stem).strip()
         if clean_parent and clean_parent != clean_stem:
             return project_diffs_dir / f"🤖 {clean_parent} — {clean_stem}.md"
         return project_diffs_dir / f"🤖 {clean_stem}.md"
@@ -459,6 +463,11 @@ def get_diff_artifact(
             else:
                 disk_content = target_path.read_text(encoding="utf-8", errors="replace")
 
+        # Récupération préalable des snapshots CAS pour la cible
+        cas_snaps = cas.list_snapshots(target=target, limit=50)
+        if not cas_snaps and target_path:
+            cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=50)
+
         # 1. Résolution de new_text
         if to_commit_id:
             try:
@@ -474,6 +483,8 @@ def get_diff_artifact(
             new_text = content
         elif disk_content is not None:
             new_text = disk_content
+        elif cas_snaps:
+            new_text = cas.restore_snapshot(cas_snaps[0]["commit_id"]) or ""
         else:
             new_text = ""
 
@@ -481,9 +492,10 @@ def get_diff_artifact(
         use_henri_baseline = not from_commit_id or from_commit_id.lower() in ("henri", "baseline", "v0")
 
         if use_henri_baseline:
-            cas_snaps = cas.list_snapshots(target=target, limit=50)
-            if not cas_snaps and target_path:
-                cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=50)
+            if not cas_snaps:
+                cas_snaps = cas.list_snapshots(target=target, limit=50)
+                if not cas_snaps and target_path:
+                    cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=50)
 
             # Chercher dans cas.list_snapshots le snapshot ayant author == "henri"
             henri_snap = next(
