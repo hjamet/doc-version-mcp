@@ -7,6 +7,7 @@ import os
 import shutil
 import hashlib
 import logging
+import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple, Union
@@ -20,17 +21,6 @@ def _resolve_compiled_pdf(
 ) -> Optional[Path]:
     """
     Résout le fichier PDF compilé associé à target_path (ou explicit_pdf_path).
-
-    Logique :
-    1. Si explicit_pdf_path est fourni et existe sur disque, retourner son Path résolu.
-    2. Sinon, si target_path est un fichier réel sur disque (non virtual:) :
-       a) Si target_path.suffix.lower() == '.pdf' et existe, le retourner.
-       b) Chercher dans le même dossier : target_path.with_suffix('.pdf').
-       c) Si target_path est un sous-fichier (ex. tex/Declarations.tex ou sections/intro.tex),
-          parcourir le dossier parent et la racine du dépôt Git (jusqu'à 3 niveaux parents) :
-          - Chercher les fichiers .tex contenant \\documentclass qui mentionnent le nom/chemin relatif
-            du sous-fichier et dont le .pdf éponyme existe (ex. paper.tex -> paper.pdf).
-          - À défaut, s'il existe dans le dossier courant ou parent un fichier paper.pdf ou main.pdf compilé, le retourner.
     """
     if explicit_pdf_path:
         exp = Path(explicit_pdf_path)
@@ -78,7 +68,6 @@ def _resolve_compiled_pdf(
             if curr not in search_dirs:
                 search_dirs.append(curr)
 
-    # Détection de la racine Git
     curr_git = current_dir
     git_root = None
     while curr_git and curr_git.parent != curr_git:
@@ -128,7 +117,6 @@ def _resolve_compiled_pdf(
         except Exception:
             pass
 
-    # À défaut, s'il existe dans le dossier courant ou parent un fichier paper.pdf ou main.pdf compilé
     for s_dir in search_dirs:
         if not s_dir.is_dir():
             continue
@@ -141,6 +129,163 @@ def _resolve_compiled_pdf(
 
     return None
 
+
+def _encode_relative_url(rel_path_str: str) -> str:
+    """Encode les espaces en %20 dans chaque composant d'un chemin relatif sans altérer les slashes."""
+    parts = rel_path_str.replace("\\", "/").split("/")
+    encoded_parts = [urllib.parse.quote(p, safe=".:-") for p in parts]
+    return "/".join(encoded_parts)
+
+
+def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Construit un index léger des fichiers de VoiceNotes.
+    Retourne (files_by_stem, files_by_rel_path).
+    Ignore .git, .obsidian, node_modules, .trash, .venv.
+    """
+    by_stem: Dict[str, str] = {}
+    by_rel: Dict[str, str] = {}
+    if not voicenotes_dir.is_dir():
+        return by_stem, by_rel
+
+    ignored = {".git", ".obsidian", ".trash", "node_modules", ".venv", "__pycache__"}
+    for root, dirs, files in os.walk(voicenotes_dir):
+        dirs[:] = [d for d in dirs if d not in ignored]
+        root_path = Path(root)
+        for f in files:
+            p = root_path / f
+            try:
+                rel = p.relative_to(voicenotes_dir).as_posix()
+            except ValueError:
+                continue
+            by_rel[rel.lower()] = rel
+            by_rel[f.lower()] = rel
+            stem_lower = p.stem.lower()
+            if stem_lower not in by_stem:
+                by_stem[stem_lower] = rel
+    return by_stem, by_rel
+
+
+def convert_obsidian_wikilinks_for_antigravity(
+    markdown_text: str,
+    voicenotes_dir: Optional[Path] = None,
+    artifact_dir: Optional[Path] = None
+) -> str:
+    """
+    Convertit automatiquement les [[Wikilinks]] et ![[Images]] en liens Markdown cliquables
+    dans Antigravity avec chemins relatifs encodés (%20).
+    Préserve strictement l'intérieur des blocs de code fencés (```...```) et inline (`...`).
+    """
+    if not markdown_text:
+        return ""
+
+    if voicenotes_dir is None:
+        from .cas_engine import get_voicenotes_dir
+        voicenotes_dir = get_voicenotes_dir()
+    else:
+        voicenotes_dir = Path(voicenotes_dir).resolve()
+
+    if artifact_dir is None:
+        artifact_dir = voicenotes_dir / "_agents" / "project_diffs"
+    else:
+        artifact_dir = Path(artifact_dir).resolve()
+
+    by_stem, by_rel = _build_voicenotes_index(voicenotes_dir)
+
+    # 1. Extraction et protection des zones de code
+    code_blocks: List[str] = []
+    def save_code(m):
+        code_blocks.append(m.group(0))
+        return f"@@DOC_VERSION_CODE_BLOCK_{len(code_blocks) - 1}@@"
+
+    protected_text = re.sub(r'(```[\s\S]*?```|`[^`\n]+`)', save_code, markdown_text)
+
+    # 2. Conversion des images ![[Cible]] ou ![[Cible|Largeur]]
+    def repl_img(m):
+        inner = m.group(1).strip()
+        parts = inner.split("|")
+        raw_target = parts[0].strip()
+
+        cand_keys = [
+            raw_target.lower(),
+            f"_attachments/{raw_target}".lower(),
+            Path(raw_target).stem.lower()
+        ]
+        resolved_rel = None
+        for k in cand_keys:
+            if k in by_rel:
+                resolved_rel = by_rel[k]
+                break
+            if k in by_stem:
+                resolved_rel = by_stem[k]
+                break
+
+        if not resolved_rel:
+            resolved_rel = f"_attachments/{raw_target}"
+
+        full_dest = voicenotes_dir / resolved_rel
+        try:
+            rel_path = os.path.relpath(full_dest, artifact_dir).replace("\\", "/")
+        except ValueError:
+            rel_path = resolved_rel
+
+        encoded_url = _encode_relative_url(rel_path)
+        alt_text = Path(raw_target).stem.replace("_", " ")
+        return f"![{alt_text}]({encoded_url})"
+
+    protected_text = re.sub(r'!\[\[(.*?)\]\]', repl_img, protected_text)
+
+    # 3. Conversion des liens [[Cible|Alias]] et [[Cible]]
+    def repl_link(m):
+        inner = m.group(1).strip()
+        parts = inner.split("|")
+        raw_target = parts[0].strip()
+        alias = parts[1].strip() if len(parts) > 1 else ""
+
+        anchor = ""
+        target_name = raw_target
+        if "#" in raw_target:
+            target_name, anchor_part = raw_target.split("#", 1)
+            target_name = target_name.strip()
+            anchor = f"#{anchor_part.strip()}"
+
+        cand_keys = [
+            target_name.lower(),
+            f"{target_name}.md".lower(),
+            f"notes/{target_name}.md".lower(),
+            f"notes/{target_name}".lower(),
+            Path(target_name).stem.lower()
+        ]
+        resolved_rel = None
+        for k in cand_keys:
+            if k in by_rel:
+                resolved_rel = by_rel[k]
+                break
+            if k in by_stem:
+                resolved_rel = by_stem[k]
+                break
+
+        if not resolved_rel:
+            resolved_rel = f"notes/{target_name}.md" if not target_name.endswith(".md") else f"notes/{target_name}"
+
+        full_dest = voicenotes_dir / resolved_rel
+        try:
+            rel_path = os.path.relpath(full_dest, artifact_dir).replace("\\", "/")
+        except ValueError:
+            rel_path = resolved_rel
+
+        encoded_url = _encode_relative_url(rel_path) + anchor
+        display_text = alias if alias else (Path(target_name).stem if target_name else raw_target)
+        return f"[{display_text}]({encoded_url})"
+
+    protected_text = re.sub(r'\[\[(.*?)\]\]', repl_link, protected_text)
+
+    # 4. Restauration des zones de code
+    def restore_code(m):
+        idx = int(m.group(1))
+        return code_blocks[idx]
+
+    return re.sub(r'@@DOC_VERSION_CODE_BLOCK_(\d+)@@', restore_code, protected_text)
 
 
 class ArtifactBuilder:
@@ -387,8 +532,15 @@ class ArtifactBuilder:
 
         doc_title = target_name.replace('_', ' ').upper()
 
-        # Le corps annoté est utilisé directement sans aucun badge IA
-        processed_body = annotated_body
+        # Le corps annoté est converti pour Antigravity (wikilinks cliquables) sans altérer le bloc de copie brute
+        from .cas_engine import get_voicenotes_dir
+        vn_dir = get_voicenotes_dir()
+        diffs_dir = vn_dir / "_agents" / "project_diffs"
+        processed_body = convert_obsidian_wikilinks_for_antigravity(
+            annotated_body,
+            voicenotes_dir=vn_dir,
+            artifact_dir=diffs_dir
+        )
 
         if diff_count > 0:
             diff_block = (

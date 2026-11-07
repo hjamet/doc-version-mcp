@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Any, Tuple, Union
 
 from fastmcp import FastMCP
 
-from .cas_engine import CASEngine
+from .cas_engine import CASEngine, get_voicenotes_dir, normalize_target_key
 from .diff_engine import DiffEngine
 from .latex_resolver import LatexToMarkdownConverter, BibTexParser
 from .html_resolver import HtmlToMarkdownConverter, is_html_doc
@@ -273,6 +273,71 @@ def find_companion_pdf(target_path: Optional[Path], base_dir: Optional[Path], mo
     return None
 
 
+def resolve_diff_artifact_path(target: str, cas: Optional[CASEngine] = None) -> Path:
+    """
+    Fonction déterministe de nommage sans collision retournant le chemin canonique
+    dans <VoiceNotes>/_agents/project_diffs/🤖 <Nom>.md.
+    """
+    vn_dir = get_voicenotes_dir()
+    project_diffs_dir = vn_dir / "_agents" / "project_diffs"
+    project_diffs_dir.mkdir(parents=True, exist_ok=True)
+
+    t_str = str(target).strip()
+    if t_str.startswith(("virtual:", "scratch:")):
+        subj = t_str.split(":", 1)[1].strip()
+        clean_subj = re.sub(r'^draft_', '', subj, flags=re.IGNORECASE).strip()
+        if "_" in clean_subj and " " not in clean_subj:
+            clean_subj = clean_subj.replace("_", " ")
+        clean_subj = re.sub(r'[<>:"/\\|?*]', '', clean_subj).strip()
+        if not clean_subj:
+            clean_subj = "Document"
+        return project_diffs_dir / f"🤖 {clean_subj}.md"
+
+    norm_target = normalize_target_key(t_str)
+    # Déterminer si target est dans VoiceNotes
+    is_in_vn = not norm_target.startswith("~/") and not Path(norm_target).is_absolute()
+    if is_in_vn:
+        stem = Path(norm_target).stem
+        parent_name = Path(norm_target).parent.name
+        homonyms = []
+        if vn_dir.is_dir():
+            target_filename = Path(norm_target).name.lower()
+            for root, _, files in os.walk(vn_dir):
+                if any(ignored in root for ignored in [".git", ".obsidian", ".trash", "node_modules"]):
+                    continue
+                for f in files:
+                    if f.lower() == target_filename:
+                        full_f = Path(root) / f
+                        try:
+                            rel = full_f.relative_to(vn_dir).as_posix()
+                            homonyms.append(rel)
+                        except Exception:
+                            pass
+        if len(homonyms) > 1 and parent_name and parent_name not in (".", ""):
+            clean_parent = re.sub(r'[<>:"/\\|?*]', '', parent_name).strip()
+            clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+            return project_diffs_dir / f"🤖 {clean_parent} — {clean_stem}.md"
+        else:
+            clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+            return project_diffs_dir / f"🤖 {clean_stem}.md"
+    else:
+        # Fichier hors de VoiceNotes (ex. ~/Documents/code/ecir-2027/main.tex)
+        tp = Path(t_str)
+        stem = tp.stem
+        parent_name = tp.parent.name
+        posix_parts = tp.as_posix().split("/")
+        if "code" in posix_parts:
+            code_idx = posix_parts.index("code")
+            if code_idx + 1 < len(posix_parts):
+                parent_name = posix_parts[code_idx + 1]
+
+        clean_parent = re.sub(r'[<>:"/\\|?*]', '', parent_name).strip()
+        clean_stem = re.sub(r'[<>:"/\\|?*]', '', stem).strip()
+        if clean_parent and clean_parent != clean_stem:
+            return project_diffs_dir / f"🤖 {clean_parent} — {clean_stem}.md"
+        return project_diffs_dir / f"🤖 {clean_stem}.md"
+
+
 @mcp.tool()
 def get_diff_artifact(
     target: str,
@@ -408,121 +473,55 @@ def get_diff_artifact(
         else:
             new_text = ""
 
-        # 2. Résolution de old_text & synchronisation Git / CAS
-        if from_commit_id:
-            # Support des alias 'v0' et 'baseline'
-            resolved_from_id = from_commit_id
-            if from_commit_id.lower() in ("v0", "baseline"):
-                cas_snaps_all = cas.list_snapshots(target=target, limit=50)
-                if not cas_snaps_all and target_path:
-                    cas_snaps_all = cas.list_snapshots(target=target_path.as_posix(), limit=50)
-                baseline_cand = next(
-                    (c for c in cas_snaps_all if "baseline" in str(c.get("message", "")).lower() or "v0" in str(c.get("message", "")).lower()),
-                    None
-                )
-                if baseline_cand:
-                    resolved_from_id = baseline_cand["commit_id"]
+        # 2. Résolution de old_text & sélection de la baseline author="henri"
+        use_henri_baseline = not from_commit_id or from_commit_id.lower() in ("henri", "baseline", "v0")
 
-            try:
-                old_text = cas.restore_snapshot(resolved_from_id)
-                baseline_commit_id = resolved_from_id
-            except (FileNotFoundError, ValueError):
-                if is_git and repo_root and rel_git_path:
-                    git_text = get_git_file_content(repo_root, rel_git_path, resolved_from_id)
-                    if git_text is not None:
-                        old_text = git_text
-                        baseline_commit_id = resolved_from_id
-                if not old_text:
-                    raise FileNotFoundError(f"Commit baseline introuvable dans CAS et Git : {from_commit_id}")
-        else:
-            git_commits = get_git_commits(repo_root, rel_git_path, limit=10) if (is_git and repo_root and rel_git_path) else []
-
-            # Synchronisation automatique des commits Git dans le CAS s'ils sont absents
-            if is_git and repo_root and rel_git_path and git_commits and not target.startswith(("virtual:", "scratch:")):
-                for gc in reversed(git_commits[:5]):
-                    if not cas._find_commit_path(gc["commit_id"][:8]):
-                        c_text = get_git_file_content(repo_root, rel_git_path, gc["commit_id"])
-                        if c_text is not None:
-                            try:
-                                cas.create_snapshot(
-                                    target=target,
-                                    message=gc["message"],
-                                    author=gc["author"],
-                                    content=c_text,
-                                    mode=mode,
-                                    is_pinned=False,
-                                    commit_id=gc["commit_id"][:8],
-                                    timestamp=gc["timestamp"]
-                                )
-                            except Exception:
-                                pass
-
+        if use_henri_baseline:
             cas_snaps = cas.list_snapshots(target=target, limit=50)
             if not cas_snaps and target_path:
                 cas_snaps = cas.list_snapshots(target=target_path.as_posix(), limit=50)
 
-            current_raw = new_text if new_text else (content if content else (disk_content if disk_content is not None else ""))
-
-            # Priorité 1 : Historique fin Content-Addressable Storage (CAS)
-            if to_commit_id:
-                try:
-                    to_data = cas.get_commit(to_commit_id)
-                    parent_id = to_data.get("parent_commit_id")
-                    if parent_id and cas._find_commit_path(parent_id):
-                        old_text = cas.restore_snapshot(parent_id)
-                        baseline_commit_id = parent_id[:8]
-                    else:
-                        # Recherche du commit immédiatement antérieur dans la liste
-                        c_idx = next((i for i, c in enumerate(cas_snaps) if c.get("commit_id", "").startswith(to_commit_id[:8])), -1)
-                        if c_idx >= 0 and c_idx + 1 < len(cas_snaps):
-                            prev_c = cas_snaps[c_idx + 1]
-                            old_text = cas.restore_snapshot(prev_c["commit_id"])
-                            baseline_commit_id = prev_c["commit_id"][:8]
-                except Exception:
-                    pass
-
-            if not old_text and cas_snaps:
-                latest_snap = cas_snaps[0]
-                latest_id = latest_snap["commit_id"]
-                cand_text = cas.restore_snapshot(latest_id)
-
-                # Si le texte actuel correspond au snapshot le plus récent (commit N venant d'être scellé),
-                # la baseline DOIT être strictement le commit antérieur (N-1) !
-                if cand_text and current_raw and current_raw.strip() == cand_text.strip():
-                    if len(cas_snaps) > 1:
-                        parent_id = latest_snap.get("parent_commit_id")
-                        if parent_id and cas._find_commit_path(parent_id):
-                            old_text = cas.restore_snapshot(parent_id)
-                            baseline_commit_id = parent_id[:8]
-                        else:
-                            prev_id = cas_snaps[1]["commit_id"]
-                            old_text = cas.restore_snapshot(prev_id)
-                            baseline_commit_id = prev_id[:8]
-                    else:
-                        # Seul commit dans l'historique (v0)
-                        old_text = cand_text
-                        baseline_commit_id = latest_id[:8]
-                else:
-                    # Le texte actuel est en cours d'édition (N+1 non commité) :
-                    # La baseline est le dernier commit commité (N, soit cas_snaps[0])
-                    old_text = cand_text
-                    baseline_commit_id = latest_id[:8]
-
-            # Priorité 2 : Historique Git (si aucun snapshot CAS disponible)
-            elif not old_text and git_commits and repo_root and rel_git_path:
-                head_text = get_git_file_content(repo_root, rel_git_path, "HEAD")
-                latest_git_id = git_commits[0]["commit_id"]
-                if head_text is not None and current_raw and current_raw.strip() == head_text.strip() and len(git_commits) > 1:
-                    parent_text = get_git_file_content(repo_root, rel_git_path, "HEAD~1")
-                    if parent_text is not None:
-                        old_text = parent_text
-                        baseline_commit_id = git_commits[1]["commit_id"][:8]
-                    else:
-                        old_text = head_text
-                        baseline_commit_id = latest_git_id[:8]
-                else:
-                    old_text = head_text if head_text is not None else ""
-                    baseline_commit_id = latest_git_id[:8]
+            # Chercher dans cas.list_snapshots le snapshot ayant author == "henri"
+            henri_snap = next(
+                (c for c in cas_snaps if str(c.get("author", "")).strip().lower() == "henri"),
+                None
+            )
+            if henri_snap:
+                old_text = cas.restore_snapshot(henri_snap["commit_id"])
+                baseline_commit_id = henri_snap["commit_id"][:8]
+            elif cas_snaps:
+                # À défaut de snapshot henri, prendre le plus ancien snapshot cas_snaps[-1]
+                oldest_snap = cas_snaps[-1]
+                old_text = cas.restore_snapshot(oldest_snap["commit_id"])
+                baseline_commit_id = oldest_snap["commit_id"][:8]
+            elif target_path and target_path.exists() and target_path.is_file():
+                # Si aucun snapshot n'existe encore pour ce fichier disque, sceller son état actuel comme baseline author="henri"
+                baseline_content = disk_content if disk_content is not None else new_text
+                init_snap = cas.create_snapshot(
+                    target=str(target_path),
+                    message="Baseline initiale (état scellé Henri)",
+                    author="henri",
+                    content=baseline_content,
+                    mode=mode,
+                    is_pinned=True
+                )
+                old_text = baseline_content
+                baseline_commit_id = init_snap["commit_id"][:8]
+            else:
+                old_text = new_text
+        else:
+            # from_commit_id explicite
+            try:
+                old_text = cas.restore_snapshot(from_commit_id)
+                baseline_commit_id = from_commit_id[:8]
+            except (FileNotFoundError, ValueError):
+                if is_git and repo_root and rel_git_path:
+                    git_text = get_git_file_content(repo_root, rel_git_path, from_commit_id)
+                    if git_text is not None:
+                        old_text = git_text
+                        baseline_commit_id = from_commit_id[:8]
+                if not old_text:
+                    raise FileNotFoundError(f"Commit baseline introuvable dans CAS et Git : {from_commit_id}")
 
         # Si old_text n'a pas été trouvé dans le CAS/Git mais existe sur disque et diffère de content
         if not old_text and disk_content is not None and content and disk_content.strip() != content.strip():
@@ -744,10 +743,13 @@ def get_diff_artifact(
             else:
                 artifact_content = f"{callout_str}{artifact_content}"
 
-        # Sauvegarde sur disque : brain_dir si fourni, sinon répertoire temporaire dédié
-        saved_path = None
+        # Sauvegarde sur disque : écriture systématique dans le chemin canonique _agents/project_diffs/🤖 <Nom>.md
+        canonical_diff_path = resolve_diff_artifact_path(target, cas=cas)
+        canonical_diff_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Si brain_dir est spécifié et distinct, préparer la copie d'images et PDF dans brain_dir
         if brain_dir:
-            b_dir = Path(brain_dir)
+            b_dir = Path(brain_dir).resolve()
             b_dir.mkdir(parents=True, exist_ok=True)
             b_posix = b_dir.resolve().as_posix().lstrip('/')
 
@@ -794,27 +796,13 @@ def get_diff_artifact(
                     except Exception:
                         pass
 
-            artifact_content = ArtifactBuilder.format_images_for_brain(
-                artifact_content,
-                brain_target_dir=b_dir,
-                source_dir=base_dir
-            )
-            art_file = b_dir / f"{target_name}.md"
-            art_file.write_text(artifact_content, encoding="utf-8")
-            saved_path = art_file.as_posix()
-        else:
-            # Répertoire de repli pour garantir que l'artéfact est toujours sauvé sur disque
-            fallback_dir = Path(tempfile.gettempdir()) / "doc_version_artifacts"
-            fallback_dir.mkdir(parents=True, exist_ok=True)
+            if b_dir != canonical_diff_path.parent.resolve():
+                extra_file = b_dir / f"{target_name}.md"
+                extra_file.write_text(artifact_content, encoding="utf-8")
 
-            def repl_wikilink_clean(m):
-                raw = m.group(1).split('|')[0].strip()
-                alt = Path(raw).stem.replace('_', ' ')
-                return f"![{alt}]({Path(raw).name})"
-            artifact_content = re.sub(r'!\[\[(.*?)\]\]', repl_wikilink_clean, artifact_content)
-            art_file = fallback_dir / f"{target_name}.md"
-            art_file.write_text(artifact_content, encoding="utf-8")
-            saved_path = art_file.as_posix()
+        # Écriture dans le chemin maître canonique _agents/project_diffs/🤖 <Nom>.md
+        canonical_diff_path.write_text(artifact_content, encoding="utf-8")
+        saved_path = canonical_diff_path.as_posix()
 
         # Collecte unifiée des problèmes pour la boucle de raffinage itérative
         issues_list = []
@@ -859,6 +847,7 @@ def get_diff_artifact(
         res_data = {
             "status": "success",
             "saved_artifact_path": saved_path,
+            "artifact_path": saved_path,
             "diff_count": diff_count,
             "modified_sections": mod_sections,
             "baseline_commit": baseline_commit_id[:8] if baseline_commit_id else None,
@@ -1037,7 +1026,8 @@ def prune_commits(
 @mcp.tool()
 def record_git_pull_event(
     repo_path: str,
-    autostash: bool = True
+    autostash: bool = True,
+    author: str = "gemini"
 ) -> str:
     """
     Synchronise un dépôt Git via git pull --rebase (--autostash),
