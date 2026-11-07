@@ -320,7 +320,7 @@ def convert_obsidian_wikilinks_for_antigravity(
     protected_text = re.sub(r'`(\!?\[\[([^\]\n]+)\]\])`', unbacktick_wikilink, protected_text)
 
     # 3. Extraction et protection des spans de code inline restants (`...`, ````...````, etc.)
-    inline_span_pattern = re.compile(r'(?<!`)(`+)(?!\[\[)(.+?)(?<!`)\1(?!`)')
+    inline_span_pattern = re.compile(r'(?<!`)(`+)(.+?)(?<!`)\1(?!`)')
     protected_text = inline_span_pattern.sub(save_code, protected_text)
 
     # 4. Conversion des images ![[Cible]] ou ![[Cible|Largeur]]
@@ -386,6 +386,9 @@ def convert_obsidian_wikilinks_for_antigravity(
             target_name = "notes/" + target_name[len("notes/notes/"):]
 
         if not resolved_rel:
+            generic_examples = {"...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
+            if target_name in generic_examples:
+                return m.group(0)
             norm_target = target_name.replace("\\", "/").strip()
             while norm_target.lower().startswith("notes/notes/"):
                 norm_target = "notes/" + norm_target[len("notes/notes/"):]
@@ -772,7 +775,7 @@ class ArtifactBuilder:
                 p = Path(source_file)
                 if p.is_file() or p.exists():
                     posix_path = p.resolve().as_posix().lstrip('/')
-                    file_url = f"file:///{posix_path}"
+                    file_url = "file:///" + urllib.parse.quote(posix_path, safe="/:")
                     source_link_block = f"📄 **Fichier Source** : [{p.name}]({file_url})\n\n"
 
                     # Résolution du PDF compilé (explicite ou automatique)
@@ -788,7 +791,7 @@ class ArtifactBuilder:
 
                         if resolved_pdf and resolved_pdf.is_file():
                             pdf_posix = resolved_pdf.resolve().as_posix().lstrip('/')
-                            pdf_url = f"file:///{pdf_posix}"
+                            pdf_url = "file:///" + urllib.parse.quote(pdf_posix, safe="/:")
                             source_link_block += f"📕 **PDF Compilé** : [{resolved_pdf.name}]({pdf_url})\n\n"
             except Exception:
                 pass
