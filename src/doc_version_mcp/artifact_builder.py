@@ -318,13 +318,8 @@ def convert_obsidian_wikilinks_for_antigravity(
         if not resolved_rel:
             resolved_rel = f"_attachments/{raw_target}"
 
-        full_dest = voicenotes_dir / resolved_rel
-        try:
-            rel_path = os.path.relpath(full_dest, artifact_dir).replace("\\", "/")
-        except ValueError:
-            rel_path = resolved_rel
-
-        encoded_url = _encode_relative_url(rel_path)
+        resolved_rel = resolved_rel.lstrip("/\\")
+        encoded_url = _encode_relative_url(resolved_rel)
         alt_text = Path(raw_target).stem.replace("_", " ")
         return f"![{alt_text}]({encoded_url})"
 
@@ -347,13 +342,8 @@ def convert_obsidian_wikilinks_for_antigravity(
             else:
                 resolved_rel = f"notes/{norm_target}.md"
 
-        full_dest = voicenotes_dir / resolved_rel
-        try:
-            rel_path = os.path.relpath(full_dest, artifact_dir).replace("\\", "/")
-        except ValueError:
-            rel_path = resolved_rel
-
-        encoded_url = _encode_relative_url(rel_path) + anchor
+        resolved_rel = resolved_rel.lstrip("/\\")
+        encoded_url = _encode_relative_url(resolved_rel) + anchor
         display_text = alias if alias else (Path(target_name).stem if target_name else raw_target)
         return f"[{display_text}]({encoded_url})"
 
