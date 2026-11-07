@@ -670,9 +670,12 @@ def get_diff_artifact(
                     # Exemption automatique pour les notes du coffre VoiceNotes/
                     # (qui contiennent légitimement listes à puces, blocs de citation, tirets em-dash)
                     style_verdict = "WARN"
-                    soft_warnings = list(style_res.soft_warnings) + [
-                        f"[EXEMPTION COFFRE VOICENOTES] Style Guard bloquant FAIL désactivé pour note Obsidian : {style_res.hard_violations[:3]}"
-                    ]
+                    soft_warnings = list(style_res.soft_warnings) + [{
+                        "type": "Exemption Coffre VoiceNotes",
+                        "line": None,
+                        "term": "Note Obsidian VoiceNotes",
+                        "suggestion": "Style Guard bloquant désactivé (listes à puces / citations / tirets autorisés)"
+                    }]
                 else:
                     raise ValueError(style_res.error_report)
             elif style_res.verdict == "WARN":
