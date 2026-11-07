@@ -168,8 +168,8 @@ class CASEngine:
             raise ValueError(f"Identifiant de commit ambigu '{commit_id}' ({len(matches)} correspondances).")
         return None
 
-    def _delete_commit_and_orphan_blobs(self, commit_id: str) -> None:
-        """Supprime un commit JSON et son blob CAS s'il n'est plus référencé par aucun autre commit."""
+    def _delete_commit_and_orphan_blobs(self, commit_id: str, keep_blob_hash: Optional[str] = None) -> None:
+        """Supprime un commit JSON et son blob CAS s'il n'est plus référencé par aucun autre commit (sauf keep_blob_hash)."""
         c_path = self._find_commit_path(commit_id)
         if not c_path or not c_path.exists():
             return
@@ -178,7 +178,7 @@ class CASEngine:
             blob_hash = c_data.get("blob_hash")
             c_path.unlink()
 
-            if blob_hash:
+            if blob_hash and (keep_blob_hash is None or blob_hash != keep_blob_hash):
                 still_used = False
                 for f in self.commits_dir.glob("*.json"):
                     try:
@@ -247,7 +247,7 @@ class CASEngine:
             # Règle : sceller author="henri" écrase proprement l'ancienne baseline
             # et tous les commits intermédiaires author="agent" précédents de ce fichier
             for old_c in exact_existing:
-                self._delete_commit_and_orphan_blobs(old_c["commit_id"])
+                self._delete_commit_and_orphan_blobs(old_c["commit_id"], keep_blob_hash=blob_hash)
             parent_id = None
         else:
             # author != "henri" :
@@ -260,7 +260,7 @@ class CASEngine:
                 # Remplacer tout commit intermédiaire autre que la baseline henri
                 for old_c in exact_existing:
                     if old_c["commit_id"] != henri_baseline["commit_id"]:
-                        self._delete_commit_and_orphan_blobs(old_c["commit_id"])
+                        self._delete_commit_and_orphan_blobs(old_c["commit_id"], keep_blob_hash=blob_hash)
             else:
                 # Aucun commit henri : conserver le premier commit historique comme baseline
                 if exact_existing:
@@ -268,7 +268,10 @@ class CASEngine:
                     parent_id = first_snap["commit_id"]
                     for old_c in exact_existing:
                         if old_c["commit_id"] != first_snap["commit_id"]:
-                            self._delete_commit_and_orphan_blobs(old_c["commit_id"])
+                            self._delete_commit_and_orphan_blobs(old_c["commit_id"], keep_blob_hash=blob_hash)
+
+        # Ré-assurance déterministe que le blob est physiquement présent sur le disque
+        self._store_blob(content_bytes)
 
         now_utc = timestamp if timestamp else datetime.now(timezone.utc).isoformat()
 
