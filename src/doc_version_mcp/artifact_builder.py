@@ -167,6 +167,62 @@ def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[
     return by_stem, by_rel
 
 
+def _resolve_wikilink_target(
+    raw_target: str,
+    voicenotes_dir: Path,
+    by_rel: Dict[str, str],
+    by_stem: Dict[str, str]
+) -> Tuple[Optional[str], str]:
+    """
+    Résout la cible d'un wikilink vers un chemin relatif sous voicenotes_dir.
+    Retourne (resolved_rel_path, anchor).
+    Gère les ancres (#...), les fichiers .md et non-.md (_agents/scripts-for-skills/..., images, etc.).
+    """
+    anchor = ""
+    target_name = raw_target
+    if "#" in raw_target:
+        target_name, anchor_part = raw_target.split("#", 1)
+        target_name = target_name.strip()
+        anchor = f"#{anchor_part.strip()}"
+
+    norm_target = target_name.replace("\\", "/").strip()
+    if not norm_target:
+        return None, anchor
+
+    # 1. Test direct comme chemin relatif depuis voicenotes_dir
+    p_direct = voicenotes_dir / norm_target
+    if p_direct.is_file():
+        try:
+            return p_direct.relative_to(voicenotes_dir).as_posix(), anchor
+        except ValueError:
+            return norm_target, anchor
+
+    # 2. Test avec suffixe .md direct
+    p_md = voicenotes_dir / f"{norm_target}.md"
+    if p_md.is_file():
+        try:
+            return p_md.relative_to(voicenotes_dir).as_posix(), anchor
+        except ValueError:
+            return f"{norm_target}.md", anchor
+
+    # 3. Recherche dans les index légers (insensible à la casse)
+    cand_keys = [
+        norm_target.lower(),
+        f"{norm_target}.md".lower(),
+        f"notes/{norm_target}.md".lower(),
+        f"notes/{norm_target}".lower(),
+        Path(norm_target).name.lower(),
+        Path(norm_target).stem.lower()
+    ]
+    for k in cand_keys:
+        if k in by_rel:
+            return by_rel[k], anchor
+        if k in by_stem:
+            return by_stem[k], anchor
+
+    return None, anchor
+
+
 def convert_obsidian_wikilinks_for_antigravity(
     markdown_text: str,
     voicenotes_dir: Optional[Path] = None,
@@ -176,6 +232,7 @@ def convert_obsidian_wikilinks_for_antigravity(
     Convertit automatiquement les [[Wikilinks]] et ![[Images]] en liens Markdown cliquables
     dans Antigravity avec chemins relatifs encodés (%20).
     Préserve strictement l'intérieur des blocs de code fencés (```...```) et inline (`...`).
+    Dé-backticke automatiquement les wikilinks réels entourés de simples backticks `[[...]]`.
     """
     if not markdown_text:
         return ""
@@ -193,15 +250,42 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     by_stem, by_rel = _build_voicenotes_index(voicenotes_dir)
 
-    # 1. Extraction et protection des zones de code
+    # 1. Extraction et protection des blocs de code multi-lignes fencés (```...```)
     code_blocks: List[str] = []
     def save_code(m):
         code_blocks.append(m.group(0))
         return f"@@DOC_VERSION_CODE_BLOCK_{len(code_blocks) - 1}@@"
 
-    protected_text = re.sub(r'(```[\s\S]*?```|`[^`\n]+`)', save_code, markdown_text)
+    protected_text = re.sub(r'```[\s\S]*?```', save_code, markdown_text)
 
-    # 2. Conversion des images ![[Cible]] ou ![[Cible|Largeur]]
+    # 2. Remplacement des `[[...]]` ou `![[...]]` entourés par inadvertance de simples backticks
+    # dont la cible correspond à un fichier réel du coffre (ou contient '/' ou '|') par le wikilink nu
+    def unbacktick_wikilink(m):
+        full_wikilink = m.group(1)
+        inner = m.group(2).strip()
+        parts = inner.split("|")
+        raw_target = parts[0].strip()
+
+        # Ne pas toucher aux exemples génériques de syntaxe de documentation
+        generic_examples = {"...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
+        if raw_target in generic_examples:
+            return m.group(0)
+
+        if "/" in raw_target or "|" in inner:
+            return full_wikilink
+
+        resolved_rel, _ = _resolve_wikilink_target(raw_target, voicenotes_dir, by_rel, by_stem)
+        if resolved_rel is not None:
+            return full_wikilink
+
+        return m.group(0)
+
+    protected_text = re.sub(r'`(\!?\[\[([^\]\n]+)\]\])`', unbacktick_wikilink, protected_text)
+
+    # 3. Extraction et protection des blocs de code inline restants (`...`)
+    protected_text = re.sub(r'`[^`\n]+`', save_code, protected_text)
+
+    # 4. Conversion des images ![[Cible]] ou ![[Cible|Largeur]]
     def repl_img(m):
         inner = m.group(1).strip()
         parts = inner.split("|")
@@ -246,38 +330,22 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     protected_text = re.sub(r'!\[\[(.*?)\]\]', repl_img, protected_text)
 
-    # 3. Conversion des liens [[Cible|Alias]] et [[Cible]]
+    # 5. Conversion des liens [[Cible|Alias]] et [[Cible]]
     def repl_link(m):
         inner = m.group(1).strip()
         parts = inner.split("|")
         raw_target = parts[0].strip()
         alias = parts[1].strip() if len(parts) > 1 else ""
 
-        anchor = ""
-        target_name = raw_target
-        if "#" in raw_target:
-            target_name, anchor_part = raw_target.split("#", 1)
-            target_name = target_name.strip()
-            anchor = f"#{anchor_part.strip()}"
+        resolved_rel, anchor = _resolve_wikilink_target(raw_target, voicenotes_dir, by_rel, by_stem)
 
-        cand_keys = [
-            target_name.lower(),
-            f"{target_name}.md".lower(),
-            f"notes/{target_name}.md".lower(),
-            f"notes/{target_name}".lower(),
-            Path(target_name).stem.lower()
-        ]
-        resolved_rel = None
-        for k in cand_keys:
-            if k in by_rel:
-                resolved_rel = by_rel[k]
-                break
-            if k in by_stem:
-                resolved_rel = by_stem[k]
-                break
-
+        target_name = raw_target.split("#", 1)[0].strip() if "#" in raw_target else raw_target.strip()
         if not resolved_rel:
-            resolved_rel = f"notes/{target_name}.md" if not target_name.endswith(".md") else f"notes/{target_name}"
+            norm_target = target_name.replace("\\", "/")
+            if Path(norm_target).suffix:
+                resolved_rel = norm_target
+            else:
+                resolved_rel = f"notes/{norm_target}.md"
 
         full_dest = voicenotes_dir / resolved_rel
         try:
@@ -291,7 +359,7 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     protected_text = re.sub(r'\[\[(.*?)\]\]', repl_link, protected_text)
 
-    # 4. Restauration des zones de code
+    # 6. Restauration des zones de code
     def restore_code(m):
         idx = int(m.group(1))
         return code_blocks[idx]
