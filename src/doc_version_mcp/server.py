@@ -756,6 +756,8 @@ def get_diff_artifact(
         # Détection et préparation du PDF compagnon compilé (ex. document LaTeX compilé)
         companion_pdf_banner = None
         pdf_artifact_path = None
+        compiled_pdf = None
+        companion_pdf = None
         if not is_md_target:
             compiled_pdf = _resolve_compiled_pdf(target_path, explicit_pdf_path=pdf_path)
             companion_pdf = compiled_pdf or find_companion_pdf(target_path, base_dir, mode=mode)
