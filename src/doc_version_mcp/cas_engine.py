@@ -9,6 +9,7 @@ import zlib
 import hashlib
 import tempfile
 import re
+import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple, Set, Union
@@ -91,7 +92,7 @@ class CASEngine:
 
     normalize_target_key = staticmethod(normalize_target_key)
 
-    def __init__(self, storage_dir: Optional[Path] = None):
+    def __init__(self, storage_dir: Optional[Path] = None, vault_root: Optional[Path] = None):
         if storage_dir is not None:
             self.storage_dir = Path(storage_dir).resolve()
         else:
@@ -101,6 +102,11 @@ class CASEngine:
             else:
                 vn_dir = get_voicenotes_dir()
                 self.storage_dir = (vn_dir / "_agents" / "doc_version_cas").resolve()
+
+        if vault_root is not None:
+            self.vault_root = Path(vault_root).resolve()
+        else:
+            self.vault_root = get_voicenotes_dir()
 
         self.objects_dir = self.storage_dir / "objects"
         self.commits_dir = self.storage_dir / "commits"
@@ -173,27 +179,21 @@ class CASEngine:
         c_path = self._find_commit_path(commit_id)
         if not c_path or not c_path.exists():
             return
-        try:
-            c_data = json.loads(c_path.read_text(encoding="utf-8"))
-            blob_hash = c_data.get("blob_hash")
-            c_path.unlink()
+        c_data = json.loads(c_path.read_text(encoding="utf-8"))
+        blob_hash = c_data.get("blob_hash")
+        c_path.unlink(missing_ok=True)
 
-            if blob_hash and (keep_blob_hash is None or blob_hash != keep_blob_hash):
-                still_used = False
-                for f in self.commits_dir.glob("*.json"):
-                    try:
-                        other_data = json.loads(f.read_text(encoding="utf-8"))
-                        if other_data.get("blob_hash") == blob_hash:
-                            still_used = True
-                            break
-                    except Exception:
-                        pass
-                if not still_used:
-                    obj_file = self.objects_dir / blob_hash[:2] / blob_hash[2:]
-                    if obj_file.exists():
-                        obj_file.unlink()
-        except Exception:
-            pass
+        if blob_hash and (keep_blob_hash is None or blob_hash != keep_blob_hash):
+            still_used = False
+            for f in self.commits_dir.glob("*.json"):
+                other_data = json.loads(f.read_text(encoding="utf-8"))
+                if other_data.get("blob_hash") == blob_hash:
+                    still_used = True
+                    break
+            if not still_used:
+                obj_file = self.objects_dir / blob_hash[:2] / blob_hash[2:]
+                if obj_file.exists():
+                    obj_file.unlink(missing_ok=True)
 
     def create_snapshot(
         self,
@@ -447,6 +447,97 @@ class CASEngine:
         )
         return commits[:limit]
 
+    def _get_vault_mentioned_diff_stems(self) -> Set[str]:
+        """
+        Parcourt les fichiers .md de self.vault_root (en ignorant _agents/project_diffs,
+        _agents/doc_version_cas, .git, .obsidian, node_modules) et collecte
+        (en minuscules normalisées sans préfixe 🤖 ) tous les noms de fichiers 🤖 <Nom>.md
+        de _agents/project_diffs/ qui sont mentionnés dans le texte d'au moins une note du coffre
+        (que ce soit via un wikilink [[...🤖 <Nom>...]], le texte 🤖 <Nom>, ou un lien Markdown
+        contenant project_diffs/ avec décodage URL urllib.parse.unquote).
+        """
+        vault_root = getattr(self, "vault_root", None) or get_voicenotes_dir()
+        if not vault_root or not vault_root.is_dir():
+            return set()
+
+        diffs_dir = vault_root / "_agents" / "project_diffs"
+        if not diffs_dir.is_dir():
+            return set()
+
+        diff_files = list(diffs_dir.glob("🤖 *.md"))
+        if not diff_files:
+            return set()
+
+        candidates: Dict[str, Tuple[str, str, str]] = {}
+        for df in diff_files:
+            clean = df.stem.replace("🤖 ", "").strip().lower()
+            if clean:
+                candidates[clean] = (
+                    f"🤖 {clean}",
+                    f"project_diffs/🤖 {clean}",
+                    f"project_diffs/{clean}"
+                )
+
+        if not candidates:
+            return set()
+
+        ignored_rel = {
+            "_agents/project_diffs",
+            "_agents/doc_version_cas"
+        }
+        ignored_names = {".git", ".obsidian", "node_modules", ".trash", ".venv", "__pycache__"}
+        emoji_bytes = "🤖".encode("utf-8")
+        diff_bytes = b"project_diffs"
+
+        mentioned: Set[str] = set()
+
+        for root, dirs, files in os.walk(vault_root):
+            try:
+                rel = Path(root).relative_to(vault_root).as_posix().lower()
+            except ValueError:
+                rel = ""
+
+            if rel in ignored_rel or any(rel.startswith(ig + "/") for ig in ignored_rel):
+                continue
+
+            dirs[:] = [
+                d for d in dirs
+                if d not in ignored_names
+                and f"{rel}/{d}".lstrip("/").lower() not in ignored_rel
+                and not any(f"{rel}/{d}".lstrip("/").lower().startswith(ig + "/") for ig in ignored_rel)
+            ]
+
+            for f in files:
+                if not f.lower().endswith(".md"):
+                    continue
+
+                file_path = os.path.join(root, f)
+                try:
+                    with open(file_path, "rb") as fp:
+                        raw = fp.read()
+                except Exception:
+                    continue
+
+                if emoji_bytes not in raw and diff_bytes not in raw:
+                    continue
+
+                try:
+                    text = raw.decode("utf-8", errors="replace").lower()
+                except Exception:
+                    continue
+
+                unquoted = urllib.parse.unquote(text)
+
+                for clean, (pat_emoji, pat_pd_emoji, pat_pd_clean) in candidates.items():
+                    if clean not in mentioned:
+                        if pat_emoji in unquoted or pat_pd_emoji in unquoted or pat_pd_clean in unquoted:
+                            mentioned.add(clean)
+
+                if len(mentioned) == len(candidates):
+                    return mentioned
+
+        return mentioned
+
     def prune_stale_targets(
         self,
         max_age_days: int = 14,
@@ -455,13 +546,11 @@ class CASEngine:
         """
         Ménage automatique TTL : supprime les snapshots/blobs inactifs depuis plus de max_age_days
         ainsi que leurs fichiers 🤖 <Nom>.md associés dans _agents/project_diffs/.
-        Les cibles protégées (protected_targets) sont préservées.
-        Appelle prune_expired(ttl_days=max_age_days, keep_baselines=True).
+        Les cibles protégées (protected_targets) et les diffs mentionnés dans des notes du coffre
+        sont strictement préservés.
         """
-        expired_res = self.prune_expired(ttl_days=max_age_days, keep_baselines=True)
-
         now = datetime.now(timezone.utc)
-        vn_dir = get_voicenotes_dir()
+        vn_dir = getattr(self, "vault_root", None) or get_voicenotes_dir()
         diffs_dir = vn_dir / "_agents" / "project_diffs"
 
         protected_norm: Set[str] = set()
@@ -469,6 +558,39 @@ class CASEngine:
             for pt in protected_targets:
                 protected_norm.add(normalize_target_key(pt).lower())
                 protected_norm.add(Path(pt).stem.lower())
+
+        # Unionner protected_norm avec les diffs mentionnés dans des notes du coffre
+        vault_mentioned = self._get_vault_mentioned_diff_stems()
+        for vm in vault_mentioned:
+            protected_norm.add(vm.lower())
+
+        # Pour chaque fichier art_file dans diffs_dir.glob("🤖 *.md")
+        # dont le clean_name est dans protected_norm :
+        # - Ne JAMAIS supprimer art_file (même si son mtime dépasse max_age_days)
+        # - Extraire également sa cible SOURCE_FILE (depuis <!-- SOURCE_FILE: ... -->)
+        #   afin de protéger ses commits CAS lors de l'appel à prune_expired
+        protected_source_targets: Set[str] = set(protected_norm)
+        if diffs_dir.exists():
+            for art_file in diffs_dir.glob("🤖 *.md"):
+                clean_name = art_file.stem.replace("🤖 ", "").strip().lower()
+                if clean_name in protected_norm:
+                    content = art_file.read_text(encoding="utf-8", errors="replace")
+                    m = re.search(r"<!--\s*SOURCE_FILE:\s*([^\r\n]+?)\s*-->", content)
+                    if m:
+                        sf = m.group(1).strip()
+                        sf_norm = normalize_target_key(sf).lower()
+                        sf_stem = Path(sf).stem.lower()
+                        protected_norm.add(sf_norm)
+                        protected_norm.add(sf_stem)
+                        protected_source_targets.add(sf_norm)
+                        protected_source_targets.add(sf_stem)
+
+        # Appel à prune_expired avec protection des baselines, de henri et des cibles protégées/mentionnées
+        expired_res = self.prune_expired(
+            ttl_days=max_age_days,
+            keep_baselines=True,
+            protected_targets=protected_source_targets
+        )
 
         all_commits = self.list_snapshots(limit=100000)
         target_commits: Dict[str, List[Dict[str, Any]]] = {}
@@ -491,12 +613,13 @@ class CASEngine:
             for c in c_list:
                 ts_str = c.get("timestamp")
                 if ts_str:
-                    try:
-                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        if latest_dt is None or dt > latest_dt:
-                            latest_dt = dt
-                    except Exception:
-                        pass
+                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        dt = dt.astimezone(timezone.utc)
+                    if latest_dt is None or dt > latest_dt:
+                        latest_dt = dt
 
             is_stale = False
             if latest_dt:
@@ -515,31 +638,28 @@ class CASEngine:
                     del targets_map[norm_t]
 
                 stem = Path(norm_t).stem
-                if diffs_dir.exists():
+                clean_stem = stem.replace("🤖 ", "").strip().lower()
+                if diffs_dir.exists() and clean_stem not in protected_norm:
                     cand_art = diffs_dir / f"🤖 {stem}.md"
                     if cand_art.exists():
-                        try:
-                            cand_art.unlink()
-                            deleted_artifacts_count += 1
-                        except Exception:
-                            pass
+                        cand_art.unlink(missing_ok=True)
+                        deleted_artifacts_count += 1
 
         index_data["targets"] = targets_map
         self._save_index(index_data)
 
         # Nettoyage des orphelins dans project_diffs_dir non modifiés depuis > max_age_days
+        # Ne supprimer au bout de max_age_days QUE les fichiers 🤖 *.md qui ne sont
+        # ni dans protected_targets ni mentionnés dans une note du coffre
         if diffs_dir.exists():
             for art_file in diffs_dir.glob("🤖 *.md"):
                 clean_name = art_file.stem.replace("🤖 ", "").strip().lower()
                 if clean_name in protected_norm:
                     continue
-                try:
-                    mtime = datetime.fromtimestamp(art_file.stat().st_mtime, timezone.utc)
-                    if (now - mtime).total_seconds() / 86400.0 > max_age_days:
-                        art_file.unlink()
-                        deleted_artifacts_count += 1
-                except Exception:
-                    pass
+                mtime = datetime.fromtimestamp(art_file.stat().st_mtime, timezone.utc)
+                if (now - mtime).total_seconds() / 86400.0 > max_age_days:
+                    art_file.unlink(missing_ok=True)
+                    deleted_artifacts_count += 1
 
         return {
             "pruned_targets_count": len(pruned_targets),
@@ -555,12 +675,20 @@ class CASEngine:
         self,
         ttl_days: int = 14,
         max_mb: int = 500,
-        keep_baselines: bool = True
+        keep_baselines: bool = True,
+        protected_targets: Optional[Union[Set[str], List[str]]] = None
     ) -> Dict[str, Any]:
         """
-        Purge les commits expirés selon le TTL (sauf is_pinned si keep_baselines),
+        Purge les commits expirés selon le TTL (sauf is_pinned ou author="henri" si keep_baselines,
+        ainsi que les cibles protégées ou mentionnées dans le coffre),
         régule la taille totale sous max_mb et supprime les blobs orphelins.
         """
+        protected_norm: Set[str] = set()
+        if protected_targets:
+            for pt in protected_targets:
+                protected_norm.add(normalize_target_key(pt).lower())
+                protected_norm.add(Path(pt).stem.lower())
+
         now = datetime.now(timezone.utc)
         all_commits = self.list_snapshots(limit=100000)
 
@@ -570,19 +698,29 @@ class CASEngine:
         for c in all_commits:
             cid = c["commit_id"]
             is_pinned = c.get("is_pinned", False)
+            is_henri = str(c.get("author", "")).strip().lower() == "henri"
+            c_target = c.get("target", "")
+            c_norm = normalize_target_key(c_target).lower()
+            c_stem = Path(c_target).stem.lower()
+
+            is_target_protected = (c_norm in protected_norm or c_stem in protected_norm)
+
             ts_str = c.get("timestamp")
             is_expired = False
 
             if ts_str:
-                try:
-                    dt = datetime.fromisoformat(ts_str)
-                    age_days = (now - dt).total_seconds() / 86400.0
-                    if age_days > ttl_days:
-                        is_expired = True
-                except Exception:
-                    pass
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                age_days = (now - dt).total_seconds() / 86400.0
+                if age_days > ttl_days:
+                    is_expired = True
 
-            if is_expired and not (is_pinned and keep_baselines):
+            should_protect = (keep_baselines and (is_pinned or is_henri)) or is_target_protected
+
+            if is_expired and not should_protect:
                 pruned_commit_ids.append(cid)
             else:
                 kept_commit_ids.add(cid)
@@ -601,43 +739,41 @@ class CASEngine:
         for cid in pruned_commit_ids:
             c_file = self.commits_dir / f"{cid}.json"
             if c_file.exists():
-                try:
-                    c_file.unlink()
-                except Exception:
-                    pass
+                c_file.unlink(missing_ok=True)
 
-        # Si l'espace dépasse encore max_mb, purger les plus anciens non-pinned
+        # Si l'espace dépasse encore max_mb, purger les plus anciens non-protégés
         current_size = calculate_cas_size_bytes()
         if current_size > max_bytes:
             remaining_commits = [c for c in all_commits if c["commit_id"] in kept_commit_ids]
-            # Tri ascendant pour supprimer les plus vieux d'abord
             remaining_commits.sort(key=lambda c: c.get("timestamp", ""))
             for c in remaining_commits:
                 if current_size <= max_bytes:
                     break
                 cid = c["commit_id"]
-                if keep_baselines and c.get("is_pinned", False):
+                is_pinned = c.get("is_pinned", False)
+                is_henri = str(c.get("author", "")).strip().lower() == "henri"
+                c_target = c.get("target", "")
+                c_norm = normalize_target_key(c_target).lower()
+                c_stem = Path(c_target).stem.lower()
+                is_target_protected = (c_norm in protected_norm or c_stem in protected_norm)
+
+                if (keep_baselines and (is_pinned or is_henri)) or is_target_protected:
                     continue
+
                 c_file = self.commits_dir / f"{cid}.json"
                 if c_file.exists():
-                    try:
-                        c_file.unlink()
-                        pruned_commit_ids.append(cid)
-                        kept_commit_ids.discard(cid)
-                        current_size = calculate_cas_size_bytes()
-                    except Exception:
-                        pass
+                    c_file.unlink(missing_ok=True)
+                    pruned_commit_ids.append(cid)
+                    kept_commit_ids.discard(cid)
+                    current_size = calculate_cas_size_bytes()
 
         # Nettoyage des blobs orphelins
         active_blob_hashes: Set[str] = set()
         for f in self.commits_dir.glob("*.json"):
-            try:
-                c_data = json.loads(f.read_text(encoding="utf-8"))
-                bh = c_data.get("blob_hash")
-                if bh:
-                    active_blob_hashes.add(bh)
-            except Exception:
-                pass
+            c_data = json.loads(f.read_text(encoding="utf-8"))
+            bh = c_data.get("blob_hash")
+            if bh:
+                active_blob_hashes.add(bh)
 
         pruned_blobs_count = 0
         freed_blob_bytes = 0
@@ -650,12 +786,9 @@ class CASEngine:
                         full_hash = prefix + obj_file.name
                         if full_hash not in active_blob_hashes:
                             sz = obj_file.stat().st_size
-                            try:
-                                obj_file.unlink()
-                                pruned_blobs_count += 1
-                                freed_blob_bytes += sz
-                            except Exception:
-                                pass
+                            obj_file.unlink(missing_ok=True)
+                            pruned_blobs_count += 1
+                            freed_blob_bytes += sz
 
         # Réajuster l'index
         index_data = self._load_index()
