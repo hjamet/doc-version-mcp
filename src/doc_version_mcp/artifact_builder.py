@@ -286,14 +286,16 @@ def convert_obsidian_wikilinks_for_antigravity(
 
     by_stem, by_rel = _build_voicenotes_index(voicenotes_dir)
 
-    # 1. Extraction et protection des vrais blocs de code multi-lignes fencés (```...``` ou ~~~...~~~)
+    # 1. Extraction et protection des blocs <pre>...</pre> de diff et des vrais blocs de code multi-lignes fencés (```...``` ou ~~~...~~~)
     code_blocks: List[str] = []
     def save_code(m):
         code_blocks.append(m.group(0))
         return f"@@DOC_VERSION_CODE_BLOCK_{len(code_blocks) - 1}@@"
 
-    fenced_block_pattern = re.compile(r'^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$', re.MULTILINE)
-    protected_text = fenced_block_pattern.sub(save_code, markdown_text)
+    pre_block_pattern = re.compile(r'<pre\b[^>]*>[\s\S]*?</pre>', re.IGNORECASE)
+    fenced_block_pattern = re.compile(r'^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$', re.MULTILINE)
+    protected_text = pre_block_pattern.sub(save_code, markdown_text)
+    protected_text = fenced_block_pattern.sub(save_code, protected_text)
 
     # 2. Remplacement des `[[...]]` ou `![[...]]` entourés par inadvertance de simples backticks
     # dont la cible correspond à un fichier réel du coffre (ou contient '/' ou '|') par le wikilink nu

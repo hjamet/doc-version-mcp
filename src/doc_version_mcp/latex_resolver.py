@@ -883,14 +883,33 @@ class LatexToMarkdownConverter:
         """
         if not text:
             return ""
-        # 0. Protection des spans rouges légitimes issus de \textcolor{red}{...}
+        # 0. Protection des blocs de code fencés et inline (ex: ```html\n<p>...</p>\n```)
+        code_blocks: Dict[str, str] = {}
+        def _protect_code(m: re.Match) -> str:
+            tok = f"___PROTECTED_CODE_BLOCK_{len(code_blocks)}___"
+            code_blocks[tok] = m.group(0)
+            return tok
+
+        text = re.sub(
+            r'^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$',
+            _protect_code,
+            text,
+            flags=re.MULTILINE
+        )
+        text = re.sub(
+            r'(?<!`)(`+)(?!`)((?:(?!(?:#dcfce7|#fee2e2|#dbeafe|#ffedd5))[^`\n])+?)(?<!`)\1(?!`)',
+            _protect_code,
+            text
+        )
+
+        # 0.bis Protection des spans rouges légitimes issus de \textcolor{red}{...}
         red_spans: Dict[str, str] = {}
         def _protect_red_span(m: re.Match) -> str:
             tok = f"___PROTECTED_RED_SPAN_{len(red_spans)}___"
             red_spans[tok] = m.group(0)
             return tok
 
-        # 0.bis Protection des balises d'arbitrage <XXX ...>
+        # 0.ter Protection des balises d'arbitrage <XXX ...>
         xxx_tags: Dict[str, str] = {}
         def _protect_xxx(m: re.Match) -> str:
             tok = f"___PROTECTED_XXX_ARBITRATION_{len(xxx_tags)}___"
@@ -934,6 +953,9 @@ class LatexToMarkdownConverter:
             text = text.replace(tok, val)
         # 7. Restauration des balises d'arbitrage <XXX ...>
         for tok, val in xxx_tags.items():
+            text = text.replace(tok, val)
+        # 8. Restauration des blocs de code protégés
+        for tok, val in reversed(list(code_blocks.items())):
             text = text.replace(tok, val)
         return text
 

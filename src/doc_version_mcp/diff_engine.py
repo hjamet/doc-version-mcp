@@ -3,6 +3,7 @@ diff_engine.py — Moteur AST de diff inline word-diff chirurgical multi-auteurs
 """
 
 import re
+import html
 import difflib
 import hashlib
 from typing import Dict, List, Tuple, Optional, Set, Any
@@ -61,15 +62,31 @@ class DiffEngine:
 
     @classmethod
     def split_into_sections(cls, text: str) -> List[SectionBlock]:
-        """Découpe un texte Markdown en une liste de sections AST."""
+        """Découpe un texte Markdown en une liste de sections AST (en ignorant les # dans les blocs de code fencés)."""
         lines = text.splitlines()
         sections: List[SectionBlock] = []
         curr_heading = ""
         curr_level = 0
         curr_title = "Préambule"
         curr_lines: List[str] = []
+        in_fence_char = ""
+        in_fence_len = 0
 
         for line in lines:
+            if not in_fence_char:
+                m_fence = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+                if m_fence and not (m_fence.group(1)[0] == '`' and '`' in m_fence.group(2)):
+                    in_fence_char = m_fence.group(1)[0]
+                    in_fence_len = len(m_fence.group(1))
+                    curr_lines.append(line)
+                    continue
+            else:
+                if re.match(r'^ {0,3}' + re.escape(in_fence_char) + rf'{{{in_fence_len},}}[ \t]*$', line):
+                    in_fence_char = ""
+                    in_fence_len = 0
+                curr_lines.append(line)
+                continue
+
             match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if match:
                 if curr_lines or curr_heading:
@@ -308,11 +325,25 @@ class DiffEngine:
         text = re.sub(r'<span\b[^>]*>(?:🛡️|🚨|⚠️)\s*(?:Score IA|P\(AI\))\s*:?.*?</span>\s*', '', text)
         text = re.sub(r'>\s*\[!CAUTION\]\s*🔴\s*Section Supprimée\s*:.*?(?=(?:\n(?!>))|\Z)', '', text, flags=re.DOTALL)
 
-        # Supprimer le texte balisé en suppression
+        # Supprimer les blocs de code et segments balisés en suppression
+        text = re.sub(r'<pre\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>[\s\S]*?</pre>', '', text)
         text = re.sub(r'<del\b[^>]*>.*?</del>', '', text, flags=re.DOTALL)
         text = re.sub(r'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>.*?</span>', '', text, flags=re.DOTALL)
 
-        # Déballer le texte balisé en ajout
+        # Déballer les blocs de code et segments balisés en ajout
+        def _unwrap_ins_pre(m: re.Match) -> str:
+            lang = m.group(1) or ""
+            raw_inner = m.group(2) if m.group(2) is not None else (m.group(3) or "")
+            inner = html.unescape(raw_inner)
+            max_ticks = max((len(x) for x in re.findall(r'`+', inner)), default=0)
+            fence = "`" * max(3, max_ticks + 1)
+            return f"{fence}{lang}\n{inner}\n{fence}"
+
+        text = re.sub(
+            r'<pre\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(?:<code\b[^>]*?(?:data-lang="([^"]*)")?[^>]*>([\s\S]*?)</code>|([\s\S]*?))</pre>',
+            _unwrap_ins_pre,
+            text
+        )
         text = re.sub(r'<ins\b[^>]*>(.*?)</ins>', r'\1', text, flags=re.DOTALL)
         text = re.sub(r'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>(.*?)</span>', r'\1', text, flags=re.DOTALL)
         from .latex_resolver import LatexToMarkdownConverter
@@ -402,6 +433,139 @@ class DiffEngine:
             i += 1
 
         return "".join(out_lines), figure_map
+
+    @classmethod
+    def _extract_fenced_code_parts(cls, code_str: str) -> Tuple[str, str, str]:
+        """Extrait (quote_prefix, info_str, inner_code) d'un bloc de code fencé Markdown."""
+        if not code_str:
+            return "", "", ""
+        raw_lines = code_str.strip('\r\n').splitlines()
+        if not raw_lines:
+            return "", "", ""
+
+        non_empty = [l for l in raw_lines if l.strip()]
+        quote_prefix = ""
+        lines = raw_lines
+        if non_empty and all(l.lstrip().startswith('>') for l in non_empty):
+            m_q = re.match(r'^(\s*>+\s?)', non_empty[0])
+            quote_prefix = m_q.group(1) if m_q else "> "
+            lines = [re.sub(r'^\s*>+\s?', '', l, count=1) for l in raw_lines]
+
+        m_open = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', lines[0])
+        if not m_open:
+            return quote_prefix, "", "\n".join(lines)
+
+        fence_str = m_open.group(1)
+        fence_char = fence_str[0]
+        fence_len = len(fence_str)
+        info_str = m_open.group(2).strip()
+
+        if len(lines) >= 2 and re.match(rf'^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', lines[-1]):
+            inner_lines = lines[1:-1]
+        else:
+            inner_lines = lines[1:]
+
+        return quote_prefix, info_str, "\n".join(inner_lines)
+
+    @classmethod
+    def mask_code_blocks_in_text(cls, text: str) -> Tuple[str, Dict[str, str]]:
+        """Remplace les blocs de code fencés CommonMark par des marqueurs atomiques isolés."""
+        code_map: Dict[str, str] = {}
+        if not text:
+            return text, code_map
+
+        lines = text.splitlines(keepends=True)
+        out_lines: List[str] = []
+        i = 0
+        n = len(lines)
+
+        while i < n:
+            line = lines[i]
+            stripped_eol = line.rstrip('\r\n')
+            m_open = re.match(r'^(\s*>+[ \t]*)? {0,3}(`{3,}|~{3,})([^\r\n]*)$', stripped_eol)
+            if m_open:
+                q_prefix = m_open.group(1) or ""
+                fence_str = m_open.group(2)
+                info_part = m_open.group(3)
+                fence_char = fence_str[0]
+                fence_len = len(fence_str)
+
+                # CommonMark §4.5 : une fence en backticks ne peut pas contenir de backtick dans son info-string
+                if fence_char != '`' or '`' not in info_part:
+                    is_quoted = bool(q_prefix.strip())
+                    cb_lines = [line]
+                    i += 1
+                    closed = False
+                    while i < n:
+                        curr = lines[i]
+                        curr_no_eol = curr.rstrip('\r\n')
+                        if is_quoted and not curr_no_eol.lstrip().startswith('>'):
+                            break
+                        curr_body = re.sub(r'^\s*>+[ \t]?', '', curr_no_eol, count=1) if is_quoted else curr_no_eol
+                        if re.match(rf'^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', curr_body):
+                            cb_lines.append(curr)
+                            i += 1
+                            closed = True
+                            break
+                        cb_lines.append(curr)
+                        i += 1
+
+                    raw_cb = "".join(cb_lines)
+                    if not closed:
+                        nl = "" if raw_cb.endswith("\n") else "\n"
+                        raw_cb = f"{raw_cb}{nl}{q_prefix}{fence_str}\n"
+
+                    digest = hashlib.md5(raw_cb.strip().encode('utf-8')).hexdigest()[:12]
+                    token = f"___MD_CODE_BLOCK_{digest}___"
+                    code_map[token] = raw_cb
+                    if is_quoted:
+                        q_clean = q_prefix.rstrip()
+                        out_lines.append(f"{q_clean}\n{q_prefix}{token}\n{q_clean}\n")
+                    else:
+                        out_lines.append(f"\n\n{token}\n\n")
+                    continue
+
+            out_lines.append(line)
+            i += 1
+
+        return "".join(out_lines), code_map
+
+    @classmethod
+    def format_code_block_diff(
+        cls,
+        code_str: str,
+        op: str,
+        is_collab: bool = False,
+        author: str = ""
+    ) -> str:
+        """
+        Formate un bloc de code fencé ajouté ou supprimé en bloc HTML CommonMark Type 1 (<pre><code>...</code></pre>)
+        avec échappement HTML strict, empêchant tout fence non fermé ou altération Markdown interne.
+        """
+        if not code_str:
+            return ""
+        quote_prefix, info_str, inner_code = cls._extract_fenced_code_parts(code_str)
+        escaped_inner = html.escape(inner_code, quote=False)
+        lang_attr = f' data-lang="{html.escape(info_str, quote=True)}"' if info_str else ""
+
+        if op == 'delete':
+            bg, fg = ("#ffedd5", "#9a3412") if is_collab else ("#fee2e2", "#991b1b")
+            deco = " text-decoration: line-through;"
+            title_attr = f' title="Supprimé par {html.escape(author, quote=True)}"' if (is_collab and author) else ""
+        else:
+            bg, fg = ("#dbeafe", "#1e40af") if is_collab else ("#dcfce7", "#166534")
+            deco = ""
+            title_attr = f' title="Ajouté par {html.escape(author, quote=True)}"' if (is_collab and author) else ""
+
+        block_html = (
+            f'<pre{title_attr} style="background-color: {bg}; color: {fg}; padding: 10px 12px; '
+            f'border-radius: 6px; overflow-x: auto; white-space: pre-wrap; margin: 8px 0;{deco}">'
+            f'<code{lang_attr} style="background-color: transparent; color: inherit; padding: 0;">'
+            f'{escaped_inner}</code></pre>'
+        )
+        if quote_prefix:
+            return "\n".join(f"{quote_prefix}{l}" for l in block_html.splitlines())
+        return block_html
 
     @classmethod
     def mask_tables_in_text(cls, text: str) -> Tuple[str, Dict[str, str]]:
@@ -591,6 +755,21 @@ class DiffEngine:
         if not text or "$$" not in text:
             return text
 
+        protected: List[str] = []
+
+        def _stash(m: re.Match) -> str:
+            idx = len(protected)
+            protected.append(m.group(0))
+            return f"___KATEX_CODE_GUARD_{idx}___"
+
+        text = re.sub(r'<pre\b[^>]*>[\s\S]*?</pre>', _stash, text)
+        text = re.sub(r'^ {0,3}(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^ {0,3}\1[ \t]*$', _stash, text, flags=re.MULTILINE)
+
+        if "$$" not in text:
+            for idx, orig in enumerate(protected):
+                text = text.replace(f"___KATEX_CODE_GUARD_{idx}___", orig)
+            return text
+
         # 1. Nettoyer les balises de diff parasites collées directement aux délimiteurs $$ sur la même ligne
         text = re.sub(r'</?(?:ins|del|span)\b[^>]*>[^\S\r\n]*\$\$[^\S\r\n]*</?(?:ins|del|span)\b[^>]*>', '\n\n$$\n\n', text)
         text = re.sub(r'</?(?:ins|del|span)\b[^>]*>[^\S\r\n]*\$\$', '\n\n$$\n\n', text)
@@ -609,24 +788,33 @@ class DiffEngine:
 
         # 3. Nettoyer les sauts de ligne excessifs autour des blocs math
         text = re.sub(r'\n{3,}', '\n\n', text)
+        for idx, orig in enumerate(protected):
+            text = text.replace(f"___KATEX_CODE_GUARD_{idx}___", orig)
         return text.strip()
 
     @classmethod
     def sanitize_inline_code_in_diff(cls, text: str) -> str:
         """
         Garantit qu'aucune balise HTML de diff (<span...>, <ins...>, <del...>)
-        n'est piégée à l'intérieur de backticks Markdown (`...`), ce qui causerait
+        n'est piégée à l'intérieur de backticks Markdown inline (`...`), ce qui causerait
         l'affichage du HTML brut dans Obsidian et Antigravity.
-        Inverse l'imbrication pour placer les délimiteurs de code inline
-        À L'INTÉRIEUR des balises span de diff :
-        `<span ...>`ancien`</span><span ...>`nouveau`</span>` au lieu de `<span ...>...</span>`.
+        Ne traverse jamais les sauts de ligne ni les blocs de code fencés/<pre>.
         """
         if not text or '`' not in text:
             return text
 
+        protected: List[str] = []
+
+        def _stash_block(m: re.Match) -> str:
+            idx = len(protected)
+            protected.append(m.group(0))
+            return f"___INLINE_CODE_GUARD_{idx}___"
+
+        text = re.sub(r'<pre\b[^>]*>[\s\S]*?</pre>', _stash_block, text)
+        text = re.sub(r'^ {0,3}(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^ {0,3}\1[ \t]*$', _stash_block, text, flags=re.MULTILINE)
+
         code_span_pattern = re.compile(
-            r'(?<!`)(`{1,3})(?!`)(.+?)(?<!`)\1(?!`)',
-            re.DOTALL
+            r'(?<!`)(`{1,3})(?!`)([^\r\n]+?)(?<!`)\1(?!`)'
         )
 
         diff_tag_pattern = re.compile(
@@ -667,7 +855,10 @@ class DiffEngine:
 
             return "".join(out_parts)
 
-        return code_span_pattern.sub(fix_code_span, text)
+        text = code_span_pattern.sub(fix_code_span, text)
+        for idx, orig in enumerate(protected):
+            text = text.replace(f"___INLINE_CODE_GUARD_{idx}___", orig)
+        return text
 
     @classmethod
     def wrap_inline_block(cls, text: str, tag: str = "span", style: str = "", extra_attrs: str = "") -> str:
@@ -700,6 +891,8 @@ class DiffEngine:
         """Enrobe un texte supprimé dans un <span> stylisé."""
         if not text:
             return ""
+        if re.match(r'^(?:\s*>+\s*)? {0,3}(?:`{3,}|~{3,})', text.strip()):
+            return cls.format_code_block_diff(text, op='delete', is_collab=is_collab, author=author)
         if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
             return cls.format_table_diff(text, op='delete', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
@@ -725,6 +918,8 @@ class DiffEngine:
         """Enrobe un texte ajouté dans un <span> stylisé."""
         if not text:
             return ""
+        if re.match(r'^(?:\s*>+\s*)? {0,3}(?:`{3,}|~{3,})', text.strip()):
+            return cls.format_code_block_diff(text, op='insert', is_collab=is_collab, author=author)
         if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
             return cls.format_table_diff(text, op='insert', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
@@ -767,8 +962,8 @@ class DiffEngine:
 
         for p in paras:
             p_strip = p.strip()
-            # Ignorer les lignes de titres, tables, blocs mathématiques ou callouts/citations
-            if p_strip.startswith(('#', '|', '$$', '![', '>')):
+            # Ignorer les lignes de titres, tables, blocs mathématiques, blocs de code ou callouts/citations
+            if p_strip.startswith(('#', '|', '$$', '![', '>', '<pre', '```', '~~~')):
                 out_paras.append(p)
                 continue
 
@@ -827,11 +1022,13 @@ class DiffEngine:
     @classmethod
     def split_section_units(cls, text: str) -> List[str]:
         """
-        Découpe une section Markdown en unités atomiques (paragraphes, équations KaTeX, citations, callouts, tables).
-        Isole rigoureusement les blocs display math $$...$$ et préserve la granularité des paragraphes.
+        Découpe une section Markdown en unités atomiques (paragraphes, équations KaTeX, blocs de code, citations, callouts, tables).
+        Isole rigoureusement les blocs display math $$...$$ et les blocs de code fencés masqués.
         """
         text = re.sub(r'([^\n])\s*(\$\$.*?\$\$)', r'\1\n\n\2', text, flags=re.DOTALL)
         text = re.sub(r'(\$\$.*?\$\$)\s*([^\n])', r'\1\n\n\2', text, flags=re.DOTALL)
+        text = re.sub(r'([^\n])\s*((?:>+[ \t]*)?___MD_CODE_BLOCK_[0-9a-f]+___)', r'\1\n\n\2', text)
+        text = re.sub(r'((?:>+[ \t]*)?___MD_CODE_BLOCK_[0-9a-f]+___)\s*([^\n])', r'\1\n\n\2', text)
         text = re.sub(r'([^\n])\s*(>\s*\[![A-Z]+\])', r'\1\n\n\2', text)
 
         raw = re.split(r'\n\s*\n+', text.strip())
@@ -862,6 +1059,8 @@ class DiffEngine:
     def get_unit_type(cls, u: str) -> str:
         """Détermine la nature structurelle d'une unité Markdown."""
         u_s = u.strip()
+        if "___MD_CODE_BLOCK_" in u_s or re.match(r'^(?:>+\s*)? {0,3}(?:`{3,}|~{3,})', u_s):
+            return 'code_block'
         if "___MD_TABLE_BLOCK_" in u_s or (u_s.startswith('|') and '|' in u_s[1:]):
             return 'table'
         u_no_quote = u_s.lstrip('>').strip()
@@ -913,7 +1112,7 @@ class DiffEngine:
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
                         if ratio >= 0.35:
                             sim = 1.0 + ratio
-                    elif t_old == 'table':
+                    elif t_old in ('table', 'code_block'):
                         sim = 1.5
                     elif t_old in ('quote', 'paragraph', 'callout', 'image'):
                         ratio = difflib.SequenceMatcher(None, u_old[i-1], u_new[j-1], autojunk=False).ratio()
@@ -1139,16 +1338,30 @@ class DiffEngine:
         if not cls.has_substantive_words(old_text) and not cls.has_substantive_words(new_text):
             return list(new_lines), 0, 0, 0, 0
 
-        # Masquage atomique des tables
-        old_masked, old_tables = cls.mask_tables_in_text(old_text)
-        new_masked, new_tables = cls.mask_tables_in_text(new_text)
+        # Masquage atomique des blocs de code fencés puis des tables
+        old_masked, old_codes = cls.mask_code_blocks_in_text(old_text)
+        new_masked, new_codes = cls.mask_code_blocks_in_text(new_text)
+        old_masked, old_tables = cls.mask_tables_in_text(old_masked)
+        new_masked, new_tables = cls.mask_tables_in_text(new_masked)
 
         u_old = cls.split_section_units(old_masked)
         u_new = cls.split_section_units(new_masked)
 
         aligned = cls.align_section_units(u_old, u_new)
 
+        all_codes = {**old_codes, **new_codes}
         all_tables = {**old_tables, **new_tables}
+        final_code_outputs: Dict[str, str] = {}
+
+        def _emit_code_out(rendered: str) -> str:
+            tok = f"___FINAL_CODE_OUT_{len(final_code_outputs)}___"
+            final_code_outputs[tok] = rendered
+            return tok
+
+        def _resolve_code(u: str) -> str:
+            key = re.sub(r'^\s*>+\s*', '', u.strip())
+            return all_codes.get(key, all_codes.get(u.strip(), u))
+
         res_parts = []
         tot_l_add = tot_l_del = tot_c_add = tot_c_del = 0
 
@@ -1158,7 +1371,26 @@ class DiffEngine:
                 u_n = u_new[j]
                 t_o = cls.get_unit_type(u_o)
                 t_n = cls.get_unit_type(u_n)
-                if t_o == 'table' and t_n == 'table':
+                if t_o == 'code_block' and t_n == 'code_block':
+                    raw_o = _resolve_code(u_o)
+                    raw_n = _resolve_code(u_n)
+                    _, _, inner_o = cls._extract_fenced_code_parts(raw_o)
+                    _, _, inner_n = cls._extract_fenced_code_parts(raw_n)
+                    if raw_o.strip() == raw_n.strip() or re.sub(r'\s+', ' ', inner_o).strip() == re.sub(r'\s+', ' ', inner_n).strip():
+                        res_parts.append(_emit_code_out(raw_n.strip()))
+                    else:
+                        del_cb = cls.format_code_block_diff(raw_o, op='delete', is_collab=is_collab, author=author_name)
+                        ins_cb = cls.format_code_block_diff(raw_n, op='insert', is_collab=is_collab, author=author_name)
+                        res_parts.append(_emit_code_out(f"{del_cb}\n\n{ins_cb}"))
+                        cnt_o = max(1, len([l for l in inner_o.splitlines() if l.strip()])) if inner_o.strip() else 0
+                        cnt_n = max(1, len([l for l in inner_n.splitlines() if l.strip()])) if inner_n.strip() else 0
+                        if is_collab:
+                            tot_c_del += cnt_o
+                            tot_c_add += cnt_n
+                        else:
+                            tot_l_del += cnt_o
+                            tot_l_add += cnt_n
+                elif t_o == 'table' and t_n == 'table':
                     raw_o = all_tables.get(u_o.strip(), u_o)
                     raw_n = all_tables.get(u_n.strip(), u_n)
                     if raw_o.strip() == raw_n.strip():
@@ -1187,13 +1419,20 @@ class DiffEngine:
                 t_del = cls.get_unit_type(u_del)
                 if t_del == 'math':
                     res_parts.append(u_del.strip())
+                elif t_del == 'code_block':
+                    raw_del = _resolve_code(u_del)
+                    res_parts.append(_emit_code_out(cls.format_code_block_diff(raw_del, op='delete', is_collab=is_collab, author=author_name)))
                 elif t_del == 'table':
                     raw_del = all_tables.get(u_del.strip(), u_del)
                     res_parts.append(cls.format_table_diff(raw_del, op='delete', is_collab=is_collab, author=author_name))
                 else:
                     res_parts.append(cls.format_del(u_del, is_collab=is_collab, author=author_name))
-                raw_for_cnt = all_tables.get(u_del.strip(), u_del) if t_del == 'table' else u_del
-                cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
+                if t_del == 'code_block':
+                    _, _, inner_del = cls._extract_fenced_code_parts(_resolve_code(u_del))
+                    cnt = max(1, len([l for l in inner_del.splitlines() if l.strip()])) if inner_del.strip() else 0
+                else:
+                    raw_for_cnt = all_tables.get(u_del.strip(), u_del) if t_del == 'table' else u_del
+                    cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
                 if is_collab:
                     tot_c_del += cnt
                 else:
@@ -1203,13 +1442,20 @@ class DiffEngine:
                 t_ins = cls.get_unit_type(u_ins)
                 if t_ins == 'math':
                     res_parts.append(u_ins.strip())
+                elif t_ins == 'code_block':
+                    raw_ins = _resolve_code(u_ins)
+                    res_parts.append(_emit_code_out(cls.format_code_block_diff(raw_ins, op='insert', is_collab=is_collab, author=author_name)))
                 elif t_ins == 'table':
                     raw_ins = all_tables.get(u_ins.strip(), u_ins)
                     res_parts.append(cls.format_table_diff(raw_ins, op='insert', is_collab=is_collab, author=author_name))
                 else:
                     res_parts.append(cls.format_ins(u_ins, is_collab=is_collab, author=author_name))
-                raw_for_cnt = all_tables.get(u_ins.strip(), u_ins) if t_ins == 'table' else u_ins
-                cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
+                if t_ins == 'code_block':
+                    _, _, inner_ins = cls._extract_fenced_code_parts(_resolve_code(u_ins))
+                    cnt = max(1, len([l for l in inner_ins.splitlines() if l.strip()])) if inner_ins.strip() else 0
+                else:
+                    raw_for_cnt = all_tables.get(u_ins.strip(), u_ins) if t_ins == 'table' else u_ins
+                    cnt = len([l for l in raw_for_cnt.splitlines() if cls.has_substantive_words(l)])
                 if is_collab:
                     tot_c_add += cnt
                 else:
@@ -1234,7 +1480,24 @@ class DiffEngine:
 
         raw_lines = diff_text.splitlines()
         clean_lines = cls.sanitize_table_pipes_in_diff(raw_lines)
-        return clean_lines, tot_l_add, tot_l_del, tot_c_add, tot_c_del
+        final_section_text = "\n".join(clean_lines)
+        for tok, rendered in final_code_outputs.items():
+            if tok in final_section_text:
+                final_section_text = final_section_text.replace(tok, rendered)
+        for tok, raw_cb in all_codes.items():
+            if tok in final_section_text:
+                final_section_text = re.sub(
+                    rf'<span\b[^>]*style="[^"]*#(?:dcfce7|dbeafe)[^"]*"[^>]*>\s*{re.escape(tok)}\s*</span>',
+                    lambda _, cb=raw_cb: cls.format_code_block_diff(cb, op='insert', is_collab=is_collab, author=author_name),
+                    final_section_text
+                )
+                final_section_text = re.sub(
+                    rf'<span\b[^>]*style="[^"]*#(?:fee2e2|ffedd5)[^"]*"[^>]*>\s*{re.escape(tok)}\s*</span>',
+                    lambda _, cb=raw_cb: cls.format_code_block_diff(cb, op='delete', is_collab=is_collab, author=author_name),
+                    final_section_text
+                )
+                final_section_text = final_section_text.replace(tok, raw_cb.strip())
+        return final_section_text.splitlines(), tot_l_add, tot_l_del, tot_c_add, tot_c_del
 
     @classmethod
     def generate_diff_annotated_body(
