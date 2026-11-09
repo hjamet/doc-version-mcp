@@ -511,20 +511,13 @@ class CASEngine:
                 if not f.lower().endswith(".md"):
                     continue
 
-                file_path = os.path.join(root, f)
-                try:
-                    with open(file_path, "rb") as fp:
-                        raw = fp.read()
-                except Exception:
-                    continue
+                file_path = Path(root) / f
+                raw = file_path.read_bytes()
 
                 if emoji_bytes not in raw and diff_bytes not in raw:
                     continue
 
-                try:
-                    text = raw.decode("utf-8", errors="replace").lower()
-                except Exception:
-                    continue
+                text = raw.decode("utf-8", errors="replace").lower()
 
                 unquoted = urllib.parse.unquote(text)
 
@@ -537,6 +530,61 @@ class CASEngine:
                     return mentioned
 
         return mentioned
+
+    def _is_target_protected(self, target_str: str, protected_norm: Set[str]) -> bool:
+        """
+        Vérifie si une cible target_str est protégée :
+        - Correspondance exacte sur la clé normalisée (norm_t in protected_norm)
+        - Correspondance sur le stem uniquement pour les notes du coffre (notes/... ou racine coffre sans préfixe externe)
+        """
+        if not target_str:
+            return False
+        norm_t = normalize_target_key(target_str).lower()
+        if norm_t in protected_norm:
+            return True
+        is_external = norm_t.startswith(("~/", "virtual:", "scratch:")) or ":" in norm_t or norm_t.startswith("/")
+        if not is_external or norm_t.startswith("notes/"):
+            if Path(norm_t).stem.lower() in protected_norm:
+                return True
+        return False
+
+    def _resolve_protected_norms(
+        self,
+        protected_targets: Optional[Union[Set[str], List[str]]] = None
+    ) -> Set[str]:
+        """
+        Résout l'ensemble des clés et stems protégés :
+        - cibles explicitement passées dans protected_targets (clé normalisée, et stem uniquement pour notes du coffre)
+        - stems des artéfacts 🤖 *.md mentionnés dans des notes du coffre
+        - clés SOURCE_FILE normalisées (sf_norm) extraites des artéfacts 🤖 *.md protégés (SANS stem générique)
+        """
+        protected_norm: Set[str] = set()
+        if protected_targets:
+            for pt in protected_targets:
+                norm_pt = normalize_target_key(pt).lower()
+                protected_norm.add(norm_pt)
+                is_external = norm_pt.startswith(("~/", "virtual:", "scratch:")) or ":" in norm_pt or norm_pt.startswith("/")
+                if not is_external or norm_pt.startswith("notes/"):
+                    protected_norm.add(Path(pt).stem.lower())
+
+        vault_mentioned = self._get_vault_mentioned_diff_stems()
+        for vm in vault_mentioned:
+            protected_norm.add(vm.lower())
+
+        vn_dir = getattr(self, "vault_root", None) or get_voicenotes_dir()
+        diffs_dir = vn_dir / "_agents" / "project_diffs"
+        if diffs_dir.exists():
+            for art_file in diffs_dir.glob("🤖 *.md"):
+                clean_name = art_file.stem.replace("🤖 ", "").strip().lower()
+                if clean_name in protected_norm:
+                    content = art_file.read_text(encoding="utf-8", errors="replace")
+                    m = re.search(r"<!--\s*SOURCE_FILE:\s*([^\r\n]+?)\s*-->", content)
+                    if m:
+                        sf = m.group(1).strip()
+                        sf_norm = normalize_target_key(sf).lower()
+                        protected_norm.add(sf_norm)
+
+        return protected_norm
 
     def prune_stale_targets(
         self,
@@ -553,43 +601,13 @@ class CASEngine:
         vn_dir = getattr(self, "vault_root", None) or get_voicenotes_dir()
         diffs_dir = vn_dir / "_agents" / "project_diffs"
 
-        protected_norm: Set[str] = set()
-        if protected_targets:
-            for pt in protected_targets:
-                protected_norm.add(normalize_target_key(pt).lower())
-                protected_norm.add(Path(pt).stem.lower())
-
-        # Unionner protected_norm avec les diffs mentionnés dans des notes du coffre
-        vault_mentioned = self._get_vault_mentioned_diff_stems()
-        for vm in vault_mentioned:
-            protected_norm.add(vm.lower())
-
-        # Pour chaque fichier art_file dans diffs_dir.glob("🤖 *.md")
-        # dont le clean_name est dans protected_norm :
-        # - Ne JAMAIS supprimer art_file (même si son mtime dépasse max_age_days)
-        # - Extraire également sa cible SOURCE_FILE (depuis <!-- SOURCE_FILE: ... -->)
-        #   afin de protéger ses commits CAS lors de l'appel à prune_expired
-        protected_source_targets: Set[str] = set(protected_norm)
-        if diffs_dir.exists():
-            for art_file in diffs_dir.glob("🤖 *.md"):
-                clean_name = art_file.stem.replace("🤖 ", "").strip().lower()
-                if clean_name in protected_norm:
-                    content = art_file.read_text(encoding="utf-8", errors="replace")
-                    m = re.search(r"<!--\s*SOURCE_FILE:\s*([^\r\n]+?)\s*-->", content)
-                    if m:
-                        sf = m.group(1).strip()
-                        sf_norm = normalize_target_key(sf).lower()
-                        sf_stem = Path(sf).stem.lower()
-                        protected_norm.add(sf_norm)
-                        protected_norm.add(sf_stem)
-                        protected_source_targets.add(sf_norm)
-                        protected_source_targets.add(sf_stem)
+        protected_norm = self._resolve_protected_norms(protected_targets)
 
         # Appel à prune_expired avec protection des baselines, de henri et des cibles protégées/mentionnées
         expired_res = self.prune_expired(
             ttl_days=max_age_days,
             keep_baselines=True,
-            protected_targets=protected_source_targets
+            protected_targets=protected_norm
         )
 
         all_commits = self.list_snapshots(limit=100000)
@@ -606,7 +624,7 @@ class CASEngine:
         targets_map = index_data.get("targets", {})
 
         for norm_t, c_list in target_commits.items():
-            if norm_t.lower() in protected_norm or Path(norm_t).stem.lower() in protected_norm:
+            if self._is_target_protected(norm_t, protected_norm):
                 continue
 
             latest_dt = None
@@ -683,11 +701,7 @@ class CASEngine:
         ainsi que les cibles protégées ou mentionnées dans le coffre),
         régule la taille totale sous max_mb et supprime les blobs orphelins.
         """
-        protected_norm: Set[str] = set()
-        if protected_targets:
-            for pt in protected_targets:
-                protected_norm.add(normalize_target_key(pt).lower())
-                protected_norm.add(Path(pt).stem.lower())
+        protected_norm = self._resolve_protected_norms(protected_targets)
 
         now = datetime.now(timezone.utc)
         all_commits = self.list_snapshots(limit=100000)
@@ -700,10 +714,7 @@ class CASEngine:
             is_pinned = c.get("is_pinned", False)
             is_henri = str(c.get("author", "")).strip().lower() == "henri"
             c_target = c.get("target", "")
-            c_norm = normalize_target_key(c_target).lower()
-            c_stem = Path(c_target).stem.lower()
-
-            is_target_protected = (c_norm in protected_norm or c_stem in protected_norm)
+            is_target_protected = self._is_target_protected(c_target, protected_norm)
 
             ts_str = c.get("timestamp")
             is_expired = False
@@ -753,9 +764,7 @@ class CASEngine:
                 is_pinned = c.get("is_pinned", False)
                 is_henri = str(c.get("author", "")).strip().lower() == "henri"
                 c_target = c.get("target", "")
-                c_norm = normalize_target_key(c_target).lower()
-                c_stem = Path(c_target).stem.lower()
-                is_target_protected = (c_norm in protected_norm or c_stem in protected_norm)
+                is_target_protected = self._is_target_protected(c_target, protected_norm)
 
                 if (keep_baselines and (is_pinned or is_henri)) or is_target_protected:
                     continue
