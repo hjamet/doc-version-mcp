@@ -427,7 +427,11 @@ def convert_obsidian_wikilinks_for_antigravity(
         label = m.group(2)
         raw_url = m.group(3).strip()
         clean_url = _clean_diff_html_keep_new(raw_url)
-        if not clean_url or clean_url.lower().startswith(("#", "http://", "https://", "mailto:", "data:", "file://", "javascript:")):
+        if (
+            not clean_url
+            or clean_url.lower().startswith(("#", "http://", "https://", "mailto:", "data:", "file://", "javascript:", "spark:"))
+            or (re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", clean_url) and not re.match(r"^[a-zA-Z]:[/\\]", clean_url))
+        ):
             return m.group(0)
         unquoted_url = urllib.parse.unquote(clean_url)
         if unquoted_url in {".md", "notes/.md"} and not label.strip():
@@ -813,7 +817,7 @@ class ArtifactBuilder:
                 p = Path(source_file)
                 if p.is_file() or p.exists():
                     posix_path = p.resolve().as_posix().lstrip('/')
-                    file_url = "file:///" + urllib.parse.quote(posix_path, safe="/:")
+                    file_url = "file:///" + urllib.parse.quote(posix_path, safe="/:#")
                     source_link_block = f"📄 **Fichier Source** : [{p.name}]({file_url})\n\n"
 
                     # Résolution du PDF compilé (explicite ou automatique)
@@ -829,7 +833,7 @@ class ArtifactBuilder:
 
                         if resolved_pdf and resolved_pdf.is_file():
                             pdf_posix = resolved_pdf.resolve().as_posix().lstrip('/')
-                            pdf_url = "file:///" + urllib.parse.quote(pdf_posix, safe="/:")
+                            pdf_url = "file:///" + urllib.parse.quote(pdf_posix, safe="/:#")
                             source_link_block += f"📕 **PDF Compilé** : [{resolved_pdf.name}]({pdf_url})\n\n"
             except Exception:
                 pass

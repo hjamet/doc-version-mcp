@@ -9,6 +9,7 @@ import json
 import subprocess
 import tempfile
 import shutil
+import urllib.parse
 from datetime import datetime, timezone
 
 from pathlib import Path
@@ -464,7 +465,7 @@ def get_diff_artifact(
                     pass
 
                 brain_posix = b_dir.resolve().as_posix().lstrip('/')
-                pdf_url = f"file:///{brain_posix}/{pdf_name}"
+                pdf_url = "file:///" + urllib.parse.quote(f"{brain_posix}/{pdf_name}", safe="/:#")
 
                 if artifact_name and artifact_name.strip():
                     raw_target_name = artifact_name.strip()
@@ -479,9 +480,10 @@ def get_diff_artifact(
                     f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {pdf_name}]({pdf_url}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n\n"
                 )
                 source_posix = target_path.resolve().as_posix().lstrip('/')
+                encoded_source_url = "file:///" + urllib.parse.quote(source_posix, safe="/:#")
                 source_link = (
-                    f"📄 **Fichier Source** : [{pdf_name}](file:///{source_posix})\n\n"
-                    f"📕 **PDF Compilé** : [{pdf_name}](file:///{source_posix})\n\n"
+                    f"📄 **Fichier Source** : [{pdf_name}]({encoded_source_url})\n\n"
+                    f"📕 **PDF Compilé** : [{pdf_name}]({encoded_source_url})\n\n"
                 )
 
                 slug = re.sub(r'[^a-zA-Z0-9_]+', '_', target_path.stem).upper()
@@ -814,9 +816,10 @@ def get_diff_artifact(
                 except Exception:
                     pass
                 brain_posix = b_dir_companion.resolve().as_posix().lstrip('/')
+                companion_pdf_url = "file:///" + urllib.parse.quote(f"{brain_posix}/{stem}.pdf", safe="/:#")
                 companion_pdf_banner = (
                     f"> [!TIP]\n"
-                    f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {stem}.pdf](file:///{brain_posix}/{stem}.pdf) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
+                    f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : [Ouvrir et annoter {stem}.pdf]({companion_pdf_url}) *(Nouveau : sélectionnez du texte ou prenez une capture directement dans le lecteur PDF d'Antigravity pour commenter)*\n"
                 )
 
         artifact_content = ArtifactBuilder.assemble_brain_artifact(
@@ -893,9 +896,10 @@ def get_diff_artifact(
                         dest_pdf = b_dir / f"{stem}.pdf"
                         shutil.copy2(found_pdf, dest_pdf)
                         pdf_artifact_path = dest_pdf.as_posix()
+                        companion_pdf_url = "file:///" + urllib.parse.quote(f"{b_posix}/{stem}.pdf", safe="/:#")
                         pdf_banner = (
                             f"> 📄 **Visualisation & Annotation PDF Native Antigravity** : "
-                            f"[Ouvrir et annoter {stem}.pdf](file:///{b_posix}/{stem}.pdf) "
+                            f"[Ouvrir et annoter {stem}.pdf]({companion_pdf_url}) "
                             f"*(commentaires sur texte et captures d'écran annotées)*\n\n"
                         )
                         artifact_content = ArtifactBuilder.inject_pdf_banner(artifact_content, pdf_banner)
