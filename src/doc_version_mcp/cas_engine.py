@@ -97,7 +97,7 @@ class CASEngine:
             self.storage_dir = Path(storage_dir).resolve()
         else:
             env_dir = os.environ.get("DOC_VERSION_COMMITS_DIR")
-            if env_dir:
+            if env_dir and Path(env_dir).name.lower() not in ("cas_commits", "doc-version-commits"):
                 self.storage_dir = Path(env_dir).resolve()
             else:
                 vn_dir = get_voicenotes_dir()
