@@ -145,11 +145,6 @@ def _clean_diff_html_keep_new(s: str) -> str:
     return s.strip()
 
 
-def _encode_relative_url(rel_path_str: str) -> str:
-    """Encode uniquement les espaces en %20 et les parenthèses sans altérer les slashes ni les accents/emojis."""
-    return rel_path_str.replace("\\", "/").replace(" ", "%20").replace("(", "%28").replace(")", "%29")
-
-
 def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Construit un index léger des fichiers de VoiceNotes.
@@ -265,8 +260,8 @@ def convert_obsidian_wikilinks_for_antigravity(
     artifact_dir: Optional[Path] = None
 ) -> str:
     """
-    Convertit automatiquement les [[Wikilinks]] et ![[Images]] en liens Markdown cliquables
-    dans Antigravity avec chemins relatifs encodés (%20).
+    Convertit automatiquement les [[Wikilinks]], ![[Images]] et liens Markdown relatifs
+    en liens Markdown cliquables dans Antigravity avec URLs absolues file:///C:/Users/... encodées.
     Préserve strictement l'intérieur des blocs de code fencés (```...```) et inline (`...`).
     Dé-backticke automatiquement les wikilinks réels entourés de simples backticks `[[...]]`.
     """
@@ -305,9 +300,9 @@ def convert_obsidian_wikilinks_for_antigravity(
         parts = inner.split("|")
         raw_target = parts[0].strip()
 
-        # Ne pas toucher aux exemples génériques de syntaxe de documentation
-        generic_examples = {"...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
-        if raw_target in generic_examples:
+        # Ne pas toucher aux exemples génériques de syntaxe de documentation ni aux cibles vides
+        generic_examples = {"", "...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
+        if not raw_target or raw_target in generic_examples or not raw_target.strip("."):
             return m.group(0)
 
         if "/" in raw_target or "|" in inner:
@@ -319,7 +314,7 @@ def convert_obsidian_wikilinks_for_antigravity(
 
         return m.group(0)
 
-    protected_text = re.sub(r'`(\!?\[\[([^\]\n]+)\]\])`', unbacktick_wikilink, protected_text)
+    protected_text = re.sub(r'`(\!?\[\[([^\]\n]*)\]\])`', unbacktick_wikilink, protected_text)
 
     # 3. Extraction et protection des spans de code inline restants (`...`, ````...````, etc.)
     inline_span_pattern = re.compile(r'(?<!`)(`+)(.+?)(?<!`)\1(?!`)')
@@ -331,6 +326,8 @@ def convert_obsidian_wikilinks_for_antigravity(
         parts = inner.split("|")
         raw_target = parts[0].strip()
         clean_target = _clean_diff_html_keep_new(raw_target)
+        if not clean_target or not clean_target.strip("."):
+            return m.group(0)
 
         # Priorité absolue : chercher d'abord dans _attachments/ (emplacement canonique) avant thumbnails/
         resolved_rel = None
@@ -381,16 +378,17 @@ def convert_obsidian_wikilinks_for_antigravity(
         while clean_target.lower().startswith("notes/notes/"):
             clean_target = "notes/" + clean_target[len("notes/notes/"):]
 
-        resolved_rel, anchor = _resolve_wikilink_target(clean_target, voicenotes_dir, by_rel, by_stem)
-
         target_name = clean_target.split("#", 1)[0].strip() if "#" in clean_target else clean_target.strip()
         while target_name.lower().startswith("notes/notes/"):
             target_name = "notes/" + target_name[len("notes/notes/"):]
 
+        generic_examples = {"", "...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
+        if not target_name or target_name in generic_examples or not target_name.strip("."):
+            return m.group(0)
+
+        resolved_rel, anchor = _resolve_wikilink_target(clean_target, voicenotes_dir, by_rel, by_stem)
+
         if not resolved_rel:
-            generic_examples = {"...", "wikilinks", "Note", "Sous-Note.md", "Nom Image.png", "Cible", "target", "chemin"}
-            if target_name in generic_examples:
-                return m.group(0)
             norm_target = target_name.replace("\\", "/").strip()
             while norm_target.lower().startswith("notes/notes/"):
                 norm_target = "notes/" + norm_target[len("notes/notes/"):]
@@ -411,6 +409,33 @@ def convert_obsidian_wikilinks_for_antigravity(
         return f"[{display_text}]({encoded_url})"
 
     protected_text = re.sub(r'\[\[(.*?)\]\]', repl_link, protected_text)
+
+    # 5b. Normalisation des liens et images Markdown relatifs [Label](rel_path) / ![Alt](rel_path) en file:///
+    def repl_rel_md(m):
+        bang = m.group(1)
+        label = m.group(2)
+        raw_url = m.group(3).strip()
+        clean_url = _clean_diff_html_keep_new(raw_url)
+        if not clean_url or clean_url.lower().startswith(("#", "http://", "https://", "mailto:", "data:", "file://", "javascript:")):
+            return m.group(0)
+        unquoted_url = urllib.parse.unquote(clean_url)
+        if unquoted_url in {".md", "notes/.md"} and not label.strip():
+            return "`[[]]`"
+        resolved_rel, anchor = _resolve_wikilink_target(unquoted_url, voicenotes_dir, by_rel, by_stem)
+        if not resolved_rel:
+            norm_u = unquoted_url.split("#", 1)[0].replace("\\", "/").strip().lstrip("/")
+            if not norm_u or norm_u in {".md", "notes/.md"}:
+                return m.group(0)
+            resolved_rel = norm_u
+        resolved_rel = resolved_rel.lstrip("/\\")
+        abs_target = (voicenotes_dir / resolved_rel).resolve().as_posix().lstrip("/")
+        clean_anchor = _clean_diff_html_keep_new(anchor)
+        encoded_url = "file:///" + urllib.parse.quote(abs_target, safe="/:#")
+        if clean_anchor:
+            encoded_url += clean_anchor
+        return f"{bang}[{label}]({encoded_url})"
+
+    protected_text = re.sub(r'(!?)\[([^\]]*)\]\(([^)\n]+)\)', repl_rel_md, protected_text)
 
     # 6. Restauration des zones de code (multi-passes pour imbrications éventuelles)
     def restore_code(m):

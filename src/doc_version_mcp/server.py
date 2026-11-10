@@ -345,6 +345,47 @@ def resolve_diff_artifact_path(target: str, cas: Optional[CASEngine] = None) -> 
         return project_diffs_dir / f"🤖 {clean_stem}.md"
 
 
+from . import cas_engine as _mod_cas_engine
+from . import diff_engine as _mod_diff_engine
+from . import latex_resolver as _mod_latex_resolver
+from . import html_resolver as _mod_html_resolver
+from . import draft_engine as _mod_draft_engine
+from . import artifact_builder as _mod_artifact_builder
+from . import style_guard as _mod_style_guard
+import importlib
+
+_MODULE_MTIMES: Dict[str, float] = {}
+for _m in (_mod_cas_engine, _mod_diff_engine, _mod_latex_resolver, _mod_html_resolver, _mod_draft_engine, _mod_artifact_builder, _mod_style_guard):
+    if getattr(_m, "__file__", None) and os.path.exists(_m.__file__):
+        _MODULE_MTIMES[_m.__name__] = os.path.getmtime(_m.__file__)
+
+
+def _reload_submodules_if_updated() -> None:
+    """Recharge à chaud les sous-modules de doc_version_mcp si leurs fichiers sources ont été mis à jour sur disque (ex. après git pull)."""
+    global DiffEngine, LatexToMarkdownConverter, BibTexParser, HtmlToMarkdownConverter, is_html_doc, DraftEngine, ArtifactBuilder, _resolve_compiled_pdf, check_style, run_preservation_validator, detect_language
+    reloaded = False
+    for mod in (_mod_cas_engine, _mod_diff_engine, _mod_latex_resolver, _mod_html_resolver, _mod_draft_engine, _mod_artifact_builder, _mod_style_guard):
+        f_path = getattr(mod, "__file__", None)
+        if f_path and os.path.exists(f_path):
+            mtime = os.path.getmtime(f_path)
+            if _MODULE_MTIMES.get(mod.__name__) != mtime:
+                importlib.reload(mod)
+                _MODULE_MTIMES[mod.__name__] = mtime
+                reloaded = True
+    if reloaded:
+        DiffEngine = _mod_diff_engine.DiffEngine
+        LatexToMarkdownConverter = _mod_latex_resolver.LatexToMarkdownConverter
+        BibTexParser = _mod_latex_resolver.BibTexParser
+        HtmlToMarkdownConverter = _mod_html_resolver.HtmlToMarkdownConverter
+        is_html_doc = _mod_html_resolver.is_html_doc
+        DraftEngine = _mod_draft_engine.DraftEngine
+        ArtifactBuilder = _mod_artifact_builder.ArtifactBuilder
+        _resolve_compiled_pdf = _mod_artifact_builder._resolve_compiled_pdf
+        check_style = _mod_style_guard.check_style
+        run_preservation_validator = _mod_style_guard.run_preservation_validator
+        detect_language = _mod_style_guard.detect_language
+
+
 @mcp.tool()
 def get_diff_artifact(
     target: str,
@@ -371,6 +412,7 @@ def get_diff_artifact(
     StealthRL est désactivé par défaut (run_stealth=False) et ne s'exécute que sur demande explicite (run_stealth=True).
     """
     try:
+        _reload_submodules_if_updated()
         old_text = ""
         new_text = ""
         baseline_commit_id = from_commit_id
