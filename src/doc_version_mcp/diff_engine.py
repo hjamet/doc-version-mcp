@@ -74,14 +74,14 @@ class DiffEngine:
 
         for line in lines:
             if not in_fence_char:
-                m_fence = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+                m_fence = re.match(r'^(?:\s*>+[ \t]*)?[ \t]*(`{3,}|~{3,})(.*)$', line)
                 if m_fence and not (m_fence.group(1)[0] == '`' and '`' in m_fence.group(2)):
                     in_fence_char = m_fence.group(1)[0]
                     in_fence_len = len(m_fence.group(1))
                     curr_lines.append(line)
                     continue
             else:
-                if re.match(r'^ {0,3}' + re.escape(in_fence_char) + rf'{{{in_fence_len},}}[ \t]*$', line):
+                if re.match(r'^(?:\s*>+[ \t]*)?[ \t]*' + re.escape(in_fence_char) + rf'{{{in_fence_len},}}[ \t]*$', line):
                     in_fence_char = ""
                     in_fence_len = 0
                 curr_lines.append(line)
@@ -451,7 +451,7 @@ class DiffEngine:
             quote_prefix = m_q.group(1) if m_q else "> "
             lines = [re.sub(r'^\s*>+\s?', '', l, count=1) for l in raw_lines]
 
-        m_open = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', lines[0])
+        m_open = re.match(r'^[ \t]*(`{3,}|~{3,})(.*)$', lines[0])
         if not m_open:
             return quote_prefix, "", "\n".join(lines)
 
@@ -460,7 +460,7 @@ class DiffEngine:
         fence_len = len(fence_str)
         info_str = m_open.group(2).strip()
 
-        if len(lines) >= 2 and re.match(rf'^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', lines[-1]):
+        if len(lines) >= 2 and re.match(rf'^[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', lines[-1]):
             inner_lines = lines[1:-1]
         else:
             inner_lines = lines[1:]
@@ -482,7 +482,7 @@ class DiffEngine:
         while i < n:
             line = lines[i]
             stripped_eol = line.rstrip('\r\n')
-            m_open = re.match(r'^(\s*>+[ \t]*)? {0,3}(`{3,}|~{3,})([^\r\n]*)$', stripped_eol)
+            m_open = re.match(r'^(\s*>+[ \t]*)?[ \t]*(`{3,}|~{3,})([^\r\n]*)$', stripped_eol)
             if m_open:
                 q_prefix = m_open.group(1) or ""
                 fence_str = m_open.group(2)
@@ -502,7 +502,7 @@ class DiffEngine:
                         if is_quoted and not curr_no_eol.lstrip().startswith('>'):
                             break
                         curr_body = re.sub(r'^\s*>+[ \t]?', '', curr_no_eol, count=1) if is_quoted else curr_no_eol
-                        if re.match(rf'^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', curr_body):
+                        if re.match(rf'^[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*$', curr_body):
                             cb_lines.append(curr)
                             i += 1
                             closed = True
@@ -519,8 +519,7 @@ class DiffEngine:
                     token = f"___MD_CODE_BLOCK_{digest}___"
                     code_map[token] = raw_cb
                     if is_quoted:
-                        q_clean = q_prefix.rstrip()
-                        out_lines.append(f"{q_clean}\n{q_prefix}{token}\n{q_clean}\n")
+                        out_lines.append(f"\n\n{q_prefix}{token}\n\n")
                     else:
                         out_lines.append(f"\n\n{token}\n\n")
                     continue
@@ -891,8 +890,20 @@ class DiffEngine:
         """Enrobe un texte supprimé dans un <span> stylisé."""
         if not text:
             return ""
-        if re.match(r'^(?:\s*>+\s*)? {0,3}(?:`{3,}|~{3,})', text.strip()):
+        if re.match(r'^(?:\s*>+\s*)?[ \t]*(?:`{3,}|~{3,})', text.strip()):
             return cls.format_code_block_diff(text, op='delete', is_collab=is_collab, author=author)
+        if re.search(r'^(?:\s*>+[ \t]*)?[ \t]*(?:`{3,}|~{3,})', text, flags=re.MULTILINE):
+            masked, c_map = cls.mask_code_blocks_in_text(text)
+            if c_map:
+                parts = [p for p in re.split(r'\n\s*\n+', masked.strip()) if p.strip()]
+                out_p = []
+                for p in parts:
+                    key = re.sub(r'^\s*>+\s*', '', p.strip())
+                    if key in c_map:
+                        out_p.append(cls.format_code_block_diff(c_map[key], op='delete', is_collab=is_collab, author=author))
+                    else:
+                        out_p.append(cls.format_del(p, is_collab=is_collab, author=author))
+                return "\n\n".join(out_p)
         if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
             return cls.format_table_diff(text, op='delete', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
@@ -918,8 +929,20 @@ class DiffEngine:
         """Enrobe un texte ajouté dans un <span> stylisé."""
         if not text:
             return ""
-        if re.match(r'^(?:\s*>+\s*)? {0,3}(?:`{3,}|~{3,})', text.strip()):
+        if re.match(r'^(?:\s*>+\s*)?[ \t]*(?:`{3,}|~{3,})', text.strip()):
             return cls.format_code_block_diff(text, op='insert', is_collab=is_collab, author=author)
+        if re.search(r'^(?:\s*>+[ \t]*)?[ \t]*(?:`{3,}|~{3,})', text, flags=re.MULTILINE):
+            masked, c_map = cls.mask_code_blocks_in_text(text)
+            if c_map:
+                parts = [p for p in re.split(r'\n\s*\n+', masked.strip()) if p.strip()]
+                out_p = []
+                for p in parts:
+                    key = re.sub(r'^\s*>+\s*', '', p.strip())
+                    if key in c_map:
+                        out_p.append(cls.format_code_block_diff(c_map[key], op='insert', is_collab=is_collab, author=author))
+                    else:
+                        out_p.append(cls.format_ins(p, is_collab=is_collab, author=author))
+                return "\n\n".join(out_p)
         if text.strip().startswith('|') and '|' in text.strip()[1:] and any(re.search(r'\|\s*:?-{2,}:?\s*\|', l) for l in text.splitlines()):
             return cls.format_table_diff(text, op='insert', is_collab=is_collab, author=author)
         if '![' in text and '](' in text:
@@ -1059,7 +1082,7 @@ class DiffEngine:
     def get_unit_type(cls, u: str) -> str:
         """Détermine la nature structurelle d'une unité Markdown."""
         u_s = u.strip()
-        if "___MD_CODE_BLOCK_" in u_s or re.match(r'^(?:>+\s*)? {0,3}(?:`{3,}|~{3,})', u_s):
+        if "___MD_CODE_BLOCK_" in u_s or re.match(r'^(?:>+\s*)?[ \t]*(?:`{3,}|~{3,})', u_s):
             return 'code_block'
         if "___MD_TABLE_BLOCK_" in u_s or (u_s.startswith('|') and '|' in u_s[1:]):
             return 'table'
