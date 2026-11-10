@@ -145,13 +145,23 @@ def _clean_diff_html_keep_new(s: str) -> str:
     return s.strip()
 
 
+_VOICENOTES_INDEX_CACHE: Dict[str, Tuple[float, Dict[str, str], Dict[str, str]]] = {}
+
+
 def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
-    Construit un index léger des fichiers de VoiceNotes.
+    Construit un index léger des fichiers de VoiceNotes (avec cache mémoire TTL 5s).
     Retourne (files_by_stem, files_by_rel_path).
     Donne la priorité absolue à _attachments/ sur les autres dossiers (thumbnails, cache, etc.).
     Ignore .git, .obsidian, node_modules, .trash, .venv.
     """
+    import time
+    cache_key = str(voicenotes_dir.resolve())
+    now = time.monotonic()
+    cached = _VOICENOTES_INDEX_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < 5.0:
+        return cached[1], cached[2]
+
     by_stem: Dict[str, str] = {}
     by_rel: Dict[str, str] = {}
     if not voicenotes_dir.is_dir():
@@ -174,6 +184,7 @@ def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[
             stem_lower = p.stem.lower()
             if stem_lower not in by_stem or is_attachment:
                 by_stem[stem_lower] = rel
+    _VOICENOTES_INDEX_CACHE[cache_key] = (now, by_stem, by_rel)
     return by_stem, by_rel
 
 
