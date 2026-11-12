@@ -675,11 +675,15 @@ def get_diff_artifact(
         if is_html_doc(new_text, target_path):
             new_text = HtmlToMarkdownConverter.convert_text(new_text, base_dir=base_dir, brain_dir=b_dir)
 
-        # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou contenu LaTeX détecté
+        # Normalisation automatique LaTeX -> Markdown propre si fichier .tex ou vrai document LaTeX (jamais sur une note .md contenant du KaTeX !)
         def is_latex_doc(t: str) -> bool:
-            if not t:
+            if not t or is_md_target:
                 return False
-            return bool(re.search(r'\\(?:documentclass|begin\{|section|subsection|subsubsection|paragraph|subparagraph|usepackage|fontsize|selectfont|hrule|vspace|hspace|textbf|textit|textsf|texttt|emph|parbox|fcolorbox|colorbox|cite|citep|citet|newcommand|def\s*\\|caption|includegraphics|centering|rowcolor|checkmark|texttimes|acmcallout|rqbox|formaldef)\b', t))
+            # Ignorer les blocs de code fencés et les formules KaTeX ($...$, $$...$$) avant de détecter des commandes LaTeX
+            t_masked = re.sub(r'```[\s\S]*?```', ' ', t)
+            t_masked = re.sub(r'\$\$[\s\S]*?\$\$', ' ', t_masked)
+            t_masked = re.sub(r'(?<!\\)\$[^\$\n]+?(?<!\\)\$', ' ', t_masked)
+            return bool(re.search(r'\\(?:documentclass|begin\{|section|subsection|subsubsection|paragraph|subparagraph|usepackage|fontsize|selectfont|hrule|vspace|hspace|textbf|textit|textsf|texttt|emph|parbox|fcolorbox|colorbox|cite|citep|citet|newcommand|def\s*\\|caption|includegraphics|centering|rowcolor|checkmark|texttimes|acmcallout|rqbox|formaldef)\b', t_masked))
 
         if is_latex_doc(old_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in old_text):
             old_text = LatexToMarkdownConverter.convert_text(old_text, base_dir=base_dir, brain_dir=b_dir)
@@ -687,9 +691,10 @@ def get_diff_artifact(
         if is_latex_doc(new_text) or (target_path and target_path.suffix.lower() == ".tex" and "\\" in new_text):
             new_text = LatexToMarkdownConverter.convert_text(new_text, base_dir=base_dir, brain_dir=b_dir)
 
-        # Nettoyage systématique des fragments HTML et styles résiduels
-        old_text = LatexToMarkdownConverter.strip_html_and_styles(old_text)
-        new_text = LatexToMarkdownConverter.strip_html_and_styles(new_text)
+        # Nettoyage systématique des fragments HTML et styles résiduels (hors notes Markdown pures pour préserver frontmatter & KaTeX)
+        if not is_md_target:
+            old_text = LatexToMarkdownConverter.strip_html_and_styles(old_text)
+            new_text = LatexToMarkdownConverter.strip_html_and_styles(new_text)
 
         # Détermination du nom cible propre
         if artifact_name and artifact_name.strip():

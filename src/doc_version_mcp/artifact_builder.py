@@ -746,9 +746,10 @@ class ArtifactBuilder:
                 pass
 
         if is_voicenotes_note:
-            # Retrait du frontmatter YAML initial inchangé en tête du corps annoté d'une note .md
+            # Retrait du frontmatter YAML initial (multiligne ou aplati sur une ligne) en tête du corps annoté d'une note .md
             # afin qu'il ne s'affiche pas comme de fausses lignes tags: / priority: / status: au milieu de l'artéfact
             processed_body = re.sub(r'^---\r?\n[\s\S]*?\r?\n---\r?\n*', '', processed_body.lstrip())
+            processed_body = re.sub(r'^(?:<[^>]+>\s*)*---[ \t]+[a-zA-Z0-9_-]+:[^\n]*?[ \t]+---(?:</[^>]+>)*\r?\n*', '', processed_body.lstrip())
 
         if diff_count > 0:
             diff_block = (

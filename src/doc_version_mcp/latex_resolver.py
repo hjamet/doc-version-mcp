@@ -303,9 +303,22 @@ class LatexToMarkdownConverter:
         bib_parser: Optional[BibTexParser] = None,
         brain_dir: Optional[Path] = None
     ) -> str:
-        """Convertit directement une chaîne LaTeX en Markdown propre."""
+        """Convertit directement une chaîne LaTeX en Markdown propre (sans altérer un document déjà en Markdown)."""
         if not text or not text.strip():
             return ""
+        # Garde-fou Markdown : ne jamais passer une note Markdown (frontmatter YAML, titres #, wikilinks [[...]])
+        # dans le convertisseur LaTeX sous prétexte qu'elle contient du KaTeX inline (ex. $\beta_{\textsf{PKG}}$).
+        has_tex_structure = bool(re.search(
+            r'\\(?:documentclass|begin\{document\}|section\*?\s*\{|subsection\*?\s*\{|usepackage)\b',
+            text
+        ))
+        is_markdown_doc = bool(
+            re.match(r'\A\s*---\r?\n[\s\S]*?\r?\n---\r?\n', text)
+            or re.search(r'(?m)^#{1,6}\s+\S', text)
+            or '[[' in text
+        )
+        if is_markdown_doc and not has_tex_structure:
+            return text
         text = re.sub(r'\\allowbreak(?![a-zA-Z])\s*', '', text)
         converter = cls(
             root_tex_path=None,
