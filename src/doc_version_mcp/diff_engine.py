@@ -48,8 +48,8 @@ class DiffEngine:
     DEL_STYLE_COLLAB = 'style="background-color: #ffedd5; color: #9a3412; padding: 2px 4px; border-radius: 3px;"'
     INS_STYLE_COLLAB = 'style="background-color: #dbeafe; color: #1e40af; padding: 2px 4px; border-radius: 3px;"'
 
-    PARAGRAPH_BLOCK_DIFF_THRESHOLD: float = 0.5
-    """Seuil de taux de modification au-delà duquel un paragraphe est rendu en bloc plutôt que mot à mot (défaut: 0.5 = 50%)."""
+    PARAGRAPH_BLOCK_DIFF_THRESHOLD: float = 0.25
+    """Seuil de taux de modification au-delà duquel un paragraphe est rendu en bloc plutôt que mot à mot (défaut: 0.25 = 25%)."""
 
     SECTION_ALIASES = {
         'the llm network game': 'the latent space',
