@@ -503,7 +503,7 @@ class CASEngine:
             "_agents/project_diffs",
             "_agents/doc_version_cas"
         }
-        ignored_names = {".git", ".obsidian", "node_modules", ".trash", ".venv", "__pycache__"}
+        ignored_names = {".git", ".obsidian", "node_modules", ".trash", ".venv", "__pycache__", "readwise", "voicenotes", "attachments", "thumbnails", "excalidraw"}
         emoji_bytes = "🤖".encode("utf-8")
         diff_bytes = b"project_diffs"
 
