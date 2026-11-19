@@ -24,10 +24,16 @@ EXCLUDED_PREFIXES = (
     ".obsidian/",
     ".git/",
     ".trash/",
+    "templates/",
+    ".pytest_cache/",
+    ".playwright-mcp/",
     "virtual:",
     "scratch:",
     "~/",
 )
+EXCLUDED_EXACT_LOWER = {
+    "🎯 projets.md",
+}
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -42,6 +48,10 @@ def is_trackable_vault_note(rel_path: str) -> bool:
     if not lower.endswith(".md"):
         return False
     if Path(norm).is_absolute() or ":" in norm:
+        return False
+    if lower in EXCLUDED_EXACT_LOWER:
+        return False
+    if norm.rsplit("/", 1)[-1].startswith("🤖"):
         return False
     for pref in EXCLUDED_PREFIXES:
         if lower.startswith(pref):
