@@ -242,6 +242,7 @@ class CASEngine:
 
         is_author_henri = author.strip().lower() == "henri"
         parent_id = None
+        unread_baseline_text: Optional[str] = None
 
         if is_author_henri:
             # Règle : sceller author="henri" écrase proprement l'ancienne baseline
@@ -257,6 +258,7 @@ class CASEngine:
             )
             if henri_baseline:
                 parent_id = henri_baseline["commit_id"]
+                unread_baseline_text = self._read_blob(henri_baseline["blob_hash"]).decode("utf-8", errors="replace")
                 # Remplacer tout commit intermédiaire autre que la baseline henri
                 for old_c in exact_existing:
                     if old_c["commit_id"] != henri_baseline["commit_id"]:
@@ -266,6 +268,7 @@ class CASEngine:
                 if exact_existing:
                     first_snap = exact_existing[-1]
                     parent_id = first_snap["commit_id"]
+                    unread_baseline_text = self._read_blob(first_snap["blob_hash"]).decode("utf-8", errors="replace")
                     for old_c in exact_existing:
                         if old_c["commit_id"] != first_snap["commit_id"]:
                             self._delete_commit_and_orphan_blobs(old_c["commit_id"], keep_blob_hash=blob_hash)
@@ -310,6 +313,21 @@ class CASEngine:
         targets_map = index_data.setdefault("targets", {})
         targets_map[norm_target] = actual_commit_id
         self._save_index(index_data)
+
+        # Synchronisation Solution B : _agents/unread_baselines.json (Dirty-Only pour SlideFlow)
+        from .unread_baselines import is_trackable_vault_note, mark_note_read, record_baseline_if_clean
+        if is_trackable_vault_note(norm_target):
+            if is_author_henri:
+                mark_note_read(self.vault_root, norm_target)
+            elif unread_baseline_text is not None:
+                record_baseline_if_clean(
+                    vault_root=self.vault_root,
+                    rel_path=norm_target,
+                    baseline_text=unread_baseline_text,
+                    current_text=raw_text,
+                    updated_by=author,
+                    summary=message,
+                )
 
         return commit_record
 
