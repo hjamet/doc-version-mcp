@@ -156,35 +156,35 @@ def _build_voicenotes_index(voicenotes_dir: Path) -> Tuple[Dict[str, str], Dict[
     Ignore .git, .obsidian, node_modules, .trash, .venv.
     """
     import time
-    cache_key = str(voicenotes_dir.resolve())
+    base_dir = voicenotes_dir.resolve()
+    cache_key = str(base_dir)
     now = time.monotonic()
     cached = _VOICENOTES_INDEX_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < 5.0:
+    if cached and (now - cached[0]) < 60.0:
         return cached[1], cached[2]
 
     by_stem: Dict[str, str] = {}
     by_rel: Dict[str, str] = {}
-    if not voicenotes_dir.is_dir():
+    if not base_dir.is_dir():
         return by_stem, by_rel
 
+    base_str = str(base_dir)
     ignored = {".git", ".obsidian", ".trash", "node_modules", ".venv", "__pycache__"}
-    for root, dirs, files in os.walk(voicenotes_dir):
+    for root, dirs, files in os.walk(base_str):
         dirs[:] = [d for d in dirs if d not in ignored]
-        root_path = Path(root)
+        rel_dir = os.path.relpath(root, base_str).replace("\\", "/")
+        prefix = "" if rel_dir == "." else rel_dir + "/"
+        is_attachment = prefix.startswith("_attachments/")
         for f in files:
-            p = root_path / f
-            try:
-                rel = p.relative_to(voicenotes_dir).as_posix()
-            except ValueError:
-                continue
-            is_attachment = rel.startswith("_attachments/")
+            rel = prefix + f
             by_rel[rel.lower()] = rel
-            if f.lower() not in by_rel or is_attachment:
-                by_rel[f.lower()] = rel
-            stem_lower = p.stem.lower()
+            f_lower = f.lower()
+            if f_lower not in by_rel or is_attachment:
+                by_rel[f_lower] = rel
+            stem_lower = os.path.splitext(f)[0].lower()
             if stem_lower not in by_stem or is_attachment:
                 by_stem[stem_lower] = rel
-    _VOICENOTES_INDEX_CACHE[cache_key] = (now, by_stem, by_rel)
+    _VOICENOTES_INDEX_CACHE[cache_key] = (time.monotonic(), by_stem, by_rel)
     return by_stem, by_rel
 
 
